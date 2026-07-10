@@ -155,7 +155,7 @@ static void validate_running_image(void)
     }
 }
 
-#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_ETH_USE_OPENETH)
+#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_ETH_USE_OPENETH) && !defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
 static bool rnd_camera_feed(
     const size_t width, const size_t height, const uint8_t* data, const size_t len, void* ctx_data)
 {
@@ -252,7 +252,7 @@ static void boot_process(void)
     // We spend a bit of time initialising random while the splash screen is being shown
     random_full_initialization();
 
-#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_ETH_USE_OPENETH)
+#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_ETH_USE_OPENETH) && !defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
     size_t counter = 0;
     jade_camera_process_images(&rnd_camera_feed, &counter, false, false, NULL, QR_GUIDE_HIDE, NULL, NULL);
 #endif

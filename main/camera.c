@@ -320,7 +320,7 @@ static void jade_camera_init(void)
         }
     }
 #endif // !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
-#if defined(CONFIG_DISPLAY_TOUCHSCREEN)
+#if defined(CONFIG_DISPLAY_TOUCHSCREEN) && !defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
     touchscreen_deinit();
     touchscreen_init();
 #endif
@@ -331,7 +331,7 @@ static void jade_camera_stop(void)
 {
     esp_camera_deinit();
     power_camera_off();
-#if defined(CONFIG_DISPLAY_TOUCHSCREEN)
+#if defined(CONFIG_DISPLAY_TOUCHSCREEN) && !defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
     touchscreen_deinit();
     touchscreen_init();
 #endif
