@@ -1666,12 +1666,20 @@ void initialise_with_mnemonic(const bool temporary_restore, const bool force_qr_
                 break;
 
             case BTN_RESTORE_MNEMONIC_12:
-                act = make_restore_mnemonic_method_activity(12);
-                continue;
+                if (advanced_mode) {
+                    act = make_restore_mnemonic_method_activity(12);
+                    continue;
+                }
+                got_mnemonic = mnemonic_recover(12, advanced_mode, mnemonic, sizeof(mnemonic));
+                break;
 
             case BTN_RESTORE_MNEMONIC_24:
-                act = make_restore_mnemonic_method_activity(24);
-                continue;
+                if (advanced_mode) {
+                    act = make_restore_mnemonic_method_activity(24);
+                    continue;
+                }
+                got_mnemonic = mnemonic_recover(24, advanced_mode, mnemonic, sizeof(mnemonic));
+                break;
 
             case BTN_RESTORE_MNEMONIC_WORDS_12:
                 got_mnemonic = mnemonic_recover(12, advanced_mode, mnemonic, sizeof(mnemonic));

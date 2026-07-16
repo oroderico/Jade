@@ -95,15 +95,15 @@ gui_activity_t* make_restore_mnemonic_method_activity(const size_t nwords)
     btn_data_t hdrbtns[] = { { .txt = "=", .font = JADE_SYMBOLS_16x16_FONT, .ev_id = BTN_RESTORE_MNEMONIC },
         { .txt = NULL, .font = GUI_DEFAULT_FONT, .ev_id = GUI_BUTTON_EVENT_NONE } };
 
-    btn_data_t menubtns[] = { { .txt = "Word List",
+    btn_data_t menubtns[] = { { .txt = "Word",
                                   .font = GUI_DEFAULT_FONT,
                                   .ev_id
                                   = nwords == 12 ? BTN_RESTORE_MNEMONIC_WORDS_12 : BTN_RESTORE_MNEMONIC_WORDS_24 },
-        { .txt = "Word Numbers",
+        { .txt = "Index Number",
             .font = GUI_DEFAULT_FONT,
             .ev_id = nwords == 12 ? BTN_RESTORE_MNEMONIC_WORD_NUMBERS_12 : BTN_RESTORE_MNEMONIC_WORD_NUMBERS_24 } };
 
-    gui_activity_t* const act = make_menu_activity("Restore Method", hdrbtns, 2, menubtns, 2);
+    gui_activity_t* const act = make_menu_activity("Entry Method", hdrbtns, 2, menubtns, 2);
     gui_set_activity_initial_selection(menubtns[0].btn);
     return act;
 }
