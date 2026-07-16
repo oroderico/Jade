@@ -1016,7 +1016,7 @@ static size_t get_word_number_words(
     JADE_ASSERT(output_len >= (8 + 1) * nwords);
 
     digit_entry_t digit_entry = { .entry_type = DIGIT_ENTRY_WORD_NUMBER,
-        .initial_state = ZERO,
+        .initial_state = RANDOM,
         .digits_shown = true,
         .max_digits = DIGIT_ENTRY_WORD_NUMBER_SIZE,
         .max_value = BIP39_WORDLIST_LEN };
