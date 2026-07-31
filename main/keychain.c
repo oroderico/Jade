@@ -125,16 +125,29 @@ passphrase_freq_t keychain_get_passphrase_freq(void)
 
 void keychain_set_passphrase_type(const passphrase_type_t type)
 {
-    if (type == PASSPHRASE_WORDLIST) {
+    switch (type) {
+    case PASSPHRASE_WORDLIST:
+        key_flags &= ~(KEY_FLAGS_WORDLIST_PASSPHRASE | KEY_FLAGS_QR_PASSPHRASE);
         key_flags |= KEY_FLAGS_WORDLIST_PASSPHRASE;
-    } else {
-        key_flags &= ~KEY_FLAGS_WORDLIST_PASSPHRASE;
+        break;
+    case PASSPHRASE_QR:
+        key_flags &= ~(KEY_FLAGS_WORDLIST_PASSPHRASE | KEY_FLAGS_QR_PASSPHRASE);
+        key_flags |= KEY_FLAGS_QR_PASSPHRASE;
+        break;
+    case PASSPHRASE_FREETEXT:
+        key_flags &= ~(KEY_FLAGS_WORDLIST_PASSPHRASE | KEY_FLAGS_QR_PASSPHRASE);
+        break;
+    default:
+        JADE_LOGE("Unexpected passphrase type ignored: %u", type);
     }
 }
 
 passphrase_type_t keychain_get_passphrase_type(void)
 {
-    return (key_flags & KEY_FLAGS_WORDLIST_PASSPHRASE) ? PASSPHRASE_WORDLIST : PASSPHRASE_FREETEXT;
+    const uint8_t type_flags = key_flags & (KEY_FLAGS_WORDLIST_PASSPHRASE | KEY_FLAGS_QR_PASSPHRASE);
+    return type_flags == KEY_FLAGS_WORDLIST_PASSPHRASE ? PASSPHRASE_WORDLIST
+        : type_flags == KEY_FLAGS_QR_PASSPHRASE        ? PASSPHRASE_QR
+                                                       : PASSPHRASE_FREETEXT;
 }
 
 void keychain_set_confirm_export_blinding_key(const bool confirm_export)

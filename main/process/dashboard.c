@@ -1323,13 +1323,15 @@ static void handle_wallet_erase_pin(void)
 // Handle passphrase preferences
 static inline const char* passphrase_frequency_desc_from_flags(const passphrase_freq_t freq, const bool shortname)
 {
-    return freq == PASSPHRASE_ALWAYS ? "Always Ask"
-        : freq == PASSPHRASE_ONCE    ? (shortname ? "Next Login" : "Next Login Only")
-                                     : "Disabled";
+    return freq == PASSPHRASE_ALWAYS ? "@string/passphrase_always"
+        : freq == PASSPHRASE_ONCE ? (shortname ? "@string/passphrase_next_login" : "@string/passphrase_next_login_only")
+                                  : "@string/passphrase_disabled";
 }
 static inline const char* passphrase_method_desc_from_flags(const passphrase_type_t type)
 {
-    return type == PASSPHRASE_WORDLIST ? "WordList" : "Manual";
+    return type == PASSPHRASE_WORDLIST ? "@string/passphrase_method_wordlist"
+        : type == PASSPHRASE_QR        ? "@string/passphrase_method_qr"
+                                       : "@string/passphrase_method_manual";
 }
 
 static void handle_passphrase_prefs()
@@ -1344,16 +1346,17 @@ static void handle_passphrase_prefs()
     gui_view_node_t* frequency_item = NULL;
     gui_view_node_t* method_item = NULL;
     gui_activity_t* const act = make_bip39_passphrase_prefs_activity(&frequency_item, &method_item);
-    update_menu_item(frequency_item, "Frequency", passphrase_frequency_desc_from_flags(freq, menu_freq_shortname));
-    update_menu_item(method_item, "Method", passphrase_method_desc_from_flags(type));
+    update_menu_item(frequency_item, "@string/passphrase_frequency",
+        passphrase_frequency_desc_from_flags(freq, menu_freq_shortname));
+    update_menu_item(method_item, "@string/passphrase_method", passphrase_method_desc_from_flags(type));
     gui_set_current_activity(act);
 
     gui_view_node_t* frequency_textbox = NULL;
-    gui_activity_t* const act_freq = make_carousel_activity("Frequency", NULL, &frequency_textbox);
+    gui_activity_t* const act_freq = make_carousel_activity("@string/passphrase_frequency", NULL, &frequency_textbox);
     gui_update_text(frequency_textbox, passphrase_frequency_desc_from_flags(freq, carousel_freq_shortname));
 
     gui_view_node_t* method_textbox = NULL;
-    gui_activity_t* const act_method = make_carousel_activity("Method", NULL, &method_textbox);
+    gui_activity_t* const act_method = make_carousel_activity("@string/passphrase_method", NULL, &method_textbox);
     gui_update_text(method_textbox, passphrase_method_desc_from_flags(type));
 
     while (true) {
@@ -1381,22 +1384,28 @@ static void handle_passphrase_prefs()
                     }
                 }
             }
-            update_menu_item(
-                frequency_item, "Frequency", passphrase_frequency_desc_from_flags(freq, menu_freq_shortname));
+            update_menu_item(frequency_item, "@string/passphrase_frequency",
+                passphrase_frequency_desc_from_flags(freq, menu_freq_shortname));
         } else if (ev_id == BTN_PASSPHRASE_METHOD) {
             gui_set_current_activity(act_method);
             while (true) {
                 gui_update_text(method_textbox, passphrase_method_desc_from_flags(type));
                 if (gui_activity_wait_event(act_method, GUI_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0)) {
                     if (ev_id == GUI_WHEEL_LEFT_EVENT || ev_id == GUI_WHEEL_RIGHT_EVENT) {
+#ifdef CONFIG_HAS_CAMERA
+                        type = type == PASSPHRASE_FREETEXT ? PASSPHRASE_WORDLIST
+                            : type == PASSPHRASE_WORDLIST  ? PASSPHRASE_QR
+                                                           : PASSPHRASE_FREETEXT;
+#else
                         type = (type == PASSPHRASE_FREETEXT ? PASSPHRASE_WORDLIST : PASSPHRASE_FREETEXT);
+#endif
                     } else if (ev_id == gui_get_click_event()) {
                         // Done
                         break;
                     }
                 }
             }
-            update_menu_item(method_item, "Method", passphrase_method_desc_from_flags(type));
+            update_menu_item(method_item, "@string/passphrase_method", passphrase_method_desc_from_flags(type));
         } else if (ev_id == BTN_PASSPHRASE_HELP) {
             await_qr_help_activity("blkstrm.com/passphrase");
         } else if (ev_id == BTN_PASSPHRASE_EXIT) {

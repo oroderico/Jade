@@ -12,11 +12,25 @@ void await_qr_help_activity(const char* url);
 // absolute, appropriate for font being used and adjusted slightly for larger screens
 #define MESSAGE_LINE_ROW_HEIGHT (CONFIG_DISPLAY_HEIGHT >= 150 ? 22 : 20)
 
+static const char* localize_text(const char* text)
+{
+    JADE_ASSERT(text);
+
+    if (strncmp("@string/", text, 8) == 0) {
+        const locale_multilang_string_t* str = locale_get(text + 8);
+        if (str) {
+            return locale_lang_with_fallback(str, GUI_LOCALE);
+        }
+    }
+
+    return text;
+}
+
 // Helper to update dynamic menu item label (name: value)
 void update_menu_item(gui_view_node_t* node, const char* label, const char* value)
 {
     char buf[32];
-    const int ret = snprintf(buf, sizeof(buf), "%s: %s", label, value);
+    const int ret = snprintf(buf, sizeof(buf), "%s: %s", localize_text(label), localize_text(value));
     JADE_ASSERT(ret > 0 && ret < sizeof(buf));
     gui_update_text(node, buf);
 }

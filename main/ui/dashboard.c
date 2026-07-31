@@ -245,16 +245,16 @@ gui_activity_t* make_bip39_passphrase_prefs_activity(
         { .txt = "?", .font = GUI_TITLE_FONT, .ev_id = BTN_PASSPHRASE_HELP } };
 
     // menu buttons with bespoke content
-    gui_make_text(frequency_textbox, "Frequency", TFT_WHITE);
+    gui_make_text(frequency_textbox, "@string/passphrase_frequency", TFT_WHITE);
     gui_set_align(*frequency_textbox, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
 
-    gui_make_text(method_textbox, "Method", TFT_WHITE);
+    gui_make_text(method_textbox, "@string/passphrase_method", TFT_WHITE);
     gui_set_align(*method_textbox, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
 
     btn_data_t menubtns[] = { { .content = *frequency_textbox, .ev_id = BTN_PASSPHRASE_FREQUENCY },
         { .content = *method_textbox, .ev_id = BTN_PASSPHRASE_METHOD } };
 
-    return make_menu_activity("BIP39 Passphrase", hdrbtns, 2, menubtns, 2);
+    return make_menu_activity("@string/passphrase_title", hdrbtns, 2, menubtns, 2);
 }
 
 gui_activity_t* make_startup_options_activity(void)

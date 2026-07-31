@@ -16,7 +16,7 @@
 
 // Wallet initialisation functions
 void initialise_with_mnemonic(bool temporary_restore, bool force_qr_scan, bool* offer_qr_temporary);
-void get_passphrase(char* passphrase, size_t passphrase_len);
+bool get_passphrase(char* passphrase, size_t passphrase_len);
 
 // Pinserver interaction
 bool pinclient_get(
@@ -234,7 +234,11 @@ static bool get_pin_load_keys(jade_process_t* process, const bool suppress_pin_c
         passphrase[0] = '\0';
 
         // Get any passphrase that may be required
-        get_passphrase(passphrase, sizeof(passphrase));
+        if (!get_passphrase(passphrase, sizeof(passphrase))) {
+            SENSITIVE_POP(passphrase);
+            jade_process_reject_message(process, CBOR_RPC_USER_CANCELLED, "Passphrase entry cancelled");
+            goto cleanup;
+        }
 
         display_processing_message_activity();
 

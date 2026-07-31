@@ -30,11 +30,48 @@
 #include <ctype.h>
 
 int register_multisig_file(const char* multisig_file, size_t multisig_file_len, const char** errmsg);
+bool is_valid_qr_passphrase(const uint8_t* data, size_t data_len);
 
 static const char TEST_MNEMONIC[] = "fish inner face ginger orchard permit useful method fence kidney chuckle party "
                                     "favorite sunset draw limb science crane oval letter slot invite sadness banana";
 static const char SERVICE_PATH_HEX[] = "00c9678fbd9d9f6a96bd43221d56733b5aba8f528487602b894e72d0f56e380f7d145b65639db7e"
                                        "e4f528a3fcfb8277b0cbbea00ef64767a531e9a447cacbfbc";
+
+static bool test_qr_passphrase_validation(void)
+{
+    const uint8_t valid[] = "Passphrase 123!";
+    const uint8_t embedded_nul[] = { 'a', '\0', 'b' };
+    const uint8_t control[] = { 'a', '\n' };
+    const uint8_t non_ascii[] = { 'a', 0x80 };
+    uint8_t max_len[PASSPHRASE_MAX_LEN];
+    memset(max_len, 'a', sizeof(max_len));
+    uint8_t too_long[PASSPHRASE_MAX_LEN + 1];
+    memset(too_long, 'a', sizeof(too_long));
+
+    return is_valid_qr_passphrase(valid, sizeof(valid) - 1) && is_valid_qr_passphrase(max_len, sizeof(max_len))
+        && !is_valid_qr_passphrase(NULL, 0) && !is_valid_qr_passphrase(valid, 0)
+        && !is_valid_qr_passphrase(too_long, sizeof(too_long))
+        && !is_valid_qr_passphrase(embedded_nul, sizeof(embedded_nul))
+        && !is_valid_qr_passphrase(control, sizeof(control)) && !is_valid_qr_passphrase(non_ascii, sizeof(non_ascii));
+}
+
+static bool test_passphrase_type_flags(void)
+{
+    const passphrase_type_t original_type = keychain_get_passphrase_type();
+    const passphrase_type_t types[] = { PASSPHRASE_FREETEXT, PASSPHRASE_WORDLIST, PASSPHRASE_QR };
+    bool ret = true;
+
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i) {
+        keychain_set_passphrase_type(types[i]);
+        if (keychain_get_passphrase_type() != types[i]) {
+            ret = false;
+            break;
+        }
+    }
+
+    keychain_set_passphrase_type(original_type);
+    return ret;
+}
 
 // See macros in keychain.c for calculating encrpyted blob lengths below
 // (Payload data is padded to next multiple of 16, and is concatenated between iv and hmac)
@@ -1530,6 +1567,13 @@ static bool test_bip85_rsa_key_gen(jade_process_t* process)
 bool debug_selfcheck(jade_process_t* process)
 {
     JADE_ASSERT(process);
+
+    if (!test_qr_passphrase_validation()) {
+        FAIL();
+    }
+    if (!test_passphrase_type_flags()) {
+        FAIL();
+    }
 
     // Test can restore known mnemonic and service path is computed as expected
     if (!test_simple_restore()) {

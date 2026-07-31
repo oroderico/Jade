@@ -30,6 +30,7 @@
 #define BIP85_INDEX_MAX 1000000
 
 typedef enum { MNEMONIC_SIMPLE, MNEMONIC_ADVANCED, WORDLIST_PASSPHRASE } wordlist_purpose_t;
+typedef enum { DERIVE_KEYCHAIN_FAILED, DERIVE_KEYCHAIN_CANCELLED, DERIVE_KEYCHAIN_SUCCESS } derive_keychain_result_t;
 
 // main/ui/mnemonic.c
 gui_activity_t* make_mnemonic_setup_type_activity(void);
@@ -1211,7 +1212,74 @@ static void get_freetext_passphrase(char* passphrase, const size_t passphrase_le
     strcpy(passphrase, kb_entry.strdata);
 }
 
-void get_passphrase(char* passphrase, const size_t passphrase_len)
+bool is_valid_qr_passphrase(const uint8_t* data, const size_t data_len)
+{
+    if (!data || !data_len || data_len > PASSPHRASE_MAX_LEN || memchr(data, '\0', data_len)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < data_len; ++i) {
+        if (data[i] < 0x20 || data[i] > 0x7e) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+#ifdef CONFIG_HAS_CAMERA
+static bool validate_qr_passphrase(qr_data_t* qr_data)
+{
+    JADE_ASSERT(qr_data);
+    JADE_ASSERT(qr_data->len < sizeof(qr_data->data));
+    JADE_ASSERT(qr_data->data[qr_data->len] == '\0');
+
+    if (is_valid_qr_passphrase(qr_data->data, qr_data->len)) {
+        return true;
+    }
+
+    qr_data->len = 0;
+    await_error("@string/passphrase_qr_invalid");
+    return false;
+}
+
+static bool get_qr_passphrase(char* passphrase, const size_t passphrase_len)
+{
+    JADE_ASSERT(passphrase);
+    JADE_ASSERT(passphrase_len == PASSPHRASE_MAX_LEN + 1);
+
+    gui_view_node_t* text_to_confirm = NULL;
+    gui_activity_t* const confirm_passphrase_activity = make_confirm_passphrase_activity("", &text_to_confirm);
+    qr_data_t qr_data = { .len = 0, .is_valid = validate_qr_passphrase };
+    SENSITIVE_PUSH(&qr_data, sizeof(qr_data));
+
+    bool ret = false;
+    while (jade_camera_scan_qr(&qr_data, "@string/passphrase_qr_scan", QR_GUIDE_SHOW, "blkstrm.com/passphrase")
+        && qr_data.len) {
+        JADE_ASSERT(is_valid_qr_passphrase(qr_data.data, qr_data.len));
+
+        gui_update_text(text_to_confirm, (const char*)qr_data.data);
+        gui_set_current_activity(confirm_passphrase_activity);
+
+        int32_t ev_id;
+        gui_activity_wait_event(confirm_passphrase_activity, GUI_BUTTON_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0);
+        if (ev_id == BTN_YES) {
+            memcpy(passphrase, qr_data.data, qr_data.len + 1);
+            ret = true;
+            break;
+        }
+
+        // Do not derive with a value the user declined. Scan again instead.
+        qr_data.len = 0;
+        qr_data.data[0] = '\0';
+    }
+
+    SENSITIVE_POP(&qr_data);
+    return ret;
+}
+#endif // CONFIG_HAS_CAMERA
+
+bool get_passphrase(char* passphrase, const size_t passphrase_len)
 {
     JADE_ASSERT(passphrase);
     JADE_ASSERT(passphrase_len);
@@ -1219,22 +1287,36 @@ void get_passphrase(char* passphrase, const size_t passphrase_len)
 
     if (keychain_get_passphrase_freq() == PASSPHRASE_NEVER) {
         // Auto apply the empty passphrase - return empty immediately
-        return;
+        return true;
     }
 
     // Ask user to enter passphrase
-    if (keychain_get_passphrase_type() == PASSPHRASE_WORDLIST) {
+    switch (keychain_get_passphrase_type()) {
+    case PASSPHRASE_WORDLIST: {
         // Passphrase made up only of bip39 wordlist words
         const size_t nwords
             = get_wordlist_words(WORDLIST_PASSPHRASE, WORDLIST_PASSPHRASE_MAX_WORDS, passphrase, passphrase_len);
         JADE_LOGI("%u wordlist words used for passphrase", nwords);
-    } else {
+        return true;
+    }
+    case PASSPHRASE_FREETEXT:
         // Free-text passphrase
         get_freetext_passphrase(passphrase, passphrase_len);
+        return true;
+    case PASSPHRASE_QR:
+#ifdef CONFIG_HAS_CAMERA
+        return get_qr_passphrase(passphrase, passphrase_len);
+#else
+        await_error("@string/passphrase_qr_unavailable");
+        return false;
+#endif
+    default:
+        JADE_ASSERT(false);
+        return false;
     }
 }
 
-bool derive_keychain(const bool temporary_restore, const char* mnemonic)
+static derive_keychain_result_t derive_keychain_with_result(const bool temporary_restore, const char* mnemonic)
 {
     JADE_ASSERT(mnemonic);
     // NOTE: mnemnonic should be valid at this point for best UX
@@ -1247,7 +1329,11 @@ bool derive_keychain(const bool temporary_restore, const char* mnemonic)
     SENSITIVE_PUSH(passphrase, sizeof(passphrase));
     passphrase[0] = '\0';
 
-    get_passphrase(passphrase, sizeof(passphrase));
+    if (!get_passphrase(passphrase, sizeof(passphrase))) {
+        SENSITIVE_POP(passphrase);
+        SENSITIVE_POP(&keydata);
+        return DERIVE_KEYCHAIN_CANCELLED;
+    }
     const size_t passphrase_len = strnlen(passphrase, sizeof(passphrase));
     JADE_ASSERT(passphrase_len < sizeof(passphrase));
 
@@ -1261,7 +1347,7 @@ bool derive_keychain(const bool temporary_restore, const char* mnemonic)
     if (!wallet_created) {
         SENSITIVE_POP(&keydata);
         JADE_LOGE("Failed to derive wallet");
-        return false;
+        return DERIVE_KEYCHAIN_FAILED;
     }
 
     // All good - push temporary into main in-memory keychain
@@ -1270,7 +1356,12 @@ bool derive_keychain(const bool temporary_restore, const char* mnemonic)
     keychain_clear_network_type_restriction();
 
     SENSITIVE_POP(&keydata);
-    return true;
+    return DERIVE_KEYCHAIN_SUCCESS;
+}
+
+bool derive_keychain(const bool temporary_restore, const char* mnemonic)
+{
+    return derive_keychain_with_result(temporary_restore, mnemonic) == DERIVE_KEYCHAIN_SUCCESS;
 }
 
 void initialise_with_mnemonic(const bool temporary_restore, const bool force_qr_scan, bool* offer_qr_temporary)
@@ -1436,10 +1527,12 @@ void initialise_with_mnemonic(const bool temporary_restore, const bool force_qr_
     // (In advanced mode we ask the user, in default/basic mode we always silently export the key.)
     keychain_set_confirm_export_blinding_key(advanced_mode);
 
-    if (!derive_keychain(temporary_restore, mnemonic)) {
-        // Error making wallet...
-        JADE_LOGE("Failed to derive keychain from valid mnemonic");
-        await_error("Failed to create wallet");
+    const derive_keychain_result_t derive_result = derive_keychain_with_result(temporary_restore, mnemonic);
+    if (derive_result != DERIVE_KEYCHAIN_SUCCESS) {
+        if (derive_result == DERIVE_KEYCHAIN_FAILED) {
+            JADE_LOGE("Failed to derive keychain from valid mnemonic");
+            await_error("Failed to create wallet");
+        }
         goto cleanup;
     }
 
