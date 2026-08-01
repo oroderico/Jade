@@ -8,6 +8,7 @@
 #include "keychain.h"
 #include "multisig.h"
 #include "process.h"
+#include "process/mnemonic.h"
 #include "random.h"
 #include "rsa.h"
 #include "storage.h"
@@ -30,7 +31,6 @@
 #include <ctype.h>
 
 int register_multisig_file(const char* multisig_file, size_t multisig_file_len, const char** errmsg);
-bool is_valid_qr_passphrase(const uint8_t* data, size_t data_len);
 
 static const char TEST_MNEMONIC[] = "fish inner face ginger orchard permit useful method fence kidney chuckle party "
                                     "favorite sunset draw limb science crane oval letter slot invite sadness banana";
@@ -39,26 +39,56 @@ static const char SERVICE_PATH_HEX[] = "00c9678fbd9d9f6a96bd43221d56733b5aba8f52
 
 static bool test_qr_passphrase_validation(void)
 {
+    const uint8_t one_char[] = "!";
     const uint8_t valid[] = "Passphrase 123!";
+    const uint8_t boundary_chars[] = { 0x20, '~' };
+    const uint8_t spaced[] = " leading and trailing ";
     const uint8_t embedded_nul[] = { 'a', '\0', 'b' };
     const uint8_t control[] = { 'a', '\n' };
+    const uint8_t other_control[] = { 'a', 0x1f };
+    const uint8_t delete_char[] = { 'a', 0x7f };
     const uint8_t non_ascii[] = { 'a', 0x80 };
+    const uint8_t valid_utf8[] = { 'c', 'a', 'f', 0xc3, 0xa9 };
+    const uint8_t invalid_utf8[] = { 'a', 0xff };
     uint8_t max_len[PASSPHRASE_MAX_LEN];
     memset(max_len, 'a', sizeof(max_len));
     uint8_t too_long[PASSPHRASE_MAX_LEN + 1];
     memset(too_long, 'a', sizeof(too_long));
+    uint8_t non_ascii_too_long[PASSPHRASE_MAX_LEN + 1];
+    memset(non_ascii_too_long, 'a', sizeof(non_ascii_too_long));
+    non_ascii_too_long[sizeof(non_ascii_too_long) - 1] = 0x80;
 
-    return is_valid_qr_passphrase(valid, sizeof(valid) - 1) && is_valid_qr_passphrase(max_len, sizeof(max_len))
+    return is_valid_qr_passphrase(one_char, sizeof(one_char) - 1)
+        && is_valid_qr_passphrase(valid, sizeof(valid) - 1)
+        && is_valid_qr_passphrase(boundary_chars, sizeof(boundary_chars))
+        && is_valid_qr_passphrase(spaced, sizeof(spaced) - 1) && is_valid_qr_passphrase(max_len, sizeof(max_len))
         && !is_valid_qr_passphrase(NULL, 0) && !is_valid_qr_passphrase(valid, 0)
         && !is_valid_qr_passphrase(too_long, sizeof(too_long))
         && !is_valid_qr_passphrase(embedded_nul, sizeof(embedded_nul))
-        && !is_valid_qr_passphrase(control, sizeof(control)) && !is_valid_qr_passphrase(non_ascii, sizeof(non_ascii));
+        && !is_valid_qr_passphrase(control, sizeof(control))
+        && !is_valid_qr_passphrase(other_control, sizeof(other_control))
+        && !is_valid_qr_passphrase(delete_char, sizeof(delete_char))
+        && !is_valid_qr_passphrase(non_ascii, sizeof(non_ascii))
+        && !is_valid_qr_passphrase(valid_utf8, sizeof(valid_utf8))
+        && !is_valid_qr_passphrase(invalid_utf8, sizeof(invalid_utf8))
+        && !is_valid_qr_passphrase(non_ascii_too_long, sizeof(non_ascii_too_long))
+        && strcmp(get_qr_passphrase_error(NULL, 0), "@string/passphrase_qr_length") == 0
+        && strcmp(get_qr_passphrase_error(too_long, sizeof(too_long)), "@string/passphrase_qr_length") == 0
+        && strcmp(get_qr_passphrase_error(control, sizeof(control)), "@string/passphrase_qr_invalid") == 0
+        && strcmp(get_qr_passphrase_error(non_ascii, sizeof(non_ascii)), "@string/passphrase_qr_ascii_only") == 0
+        && strcmp(get_qr_passphrase_error(non_ascii_too_long, sizeof(non_ascii_too_long)),
+               "@string/passphrase_qr_ascii_only")
+            == 0;
 }
 
 static bool test_passphrase_type_flags(void)
 {
     const passphrase_type_t original_type = keychain_get_passphrase_type();
+#ifdef CONFIG_HAS_CAMERA
     const passphrase_type_t types[] = { PASSPHRASE_FREETEXT, PASSPHRASE_WORDLIST, PASSPHRASE_QR };
+#else
+    const passphrase_type_t types[] = { PASSPHRASE_FREETEXT, PASSPHRASE_WORDLIST };
+#endif
     bool ret = true;
 
     for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i) {
@@ -68,6 +98,11 @@ static bool test_passphrase_type_flags(void)
             break;
         }
     }
+
+#ifndef CONFIG_HAS_CAMERA
+    keychain_set_passphrase_type(PASSPHRASE_QR);
+    ret = ret && keychain_get_passphrase_type() == PASSPHRASE_FREETEXT;
+#endif
 
     keychain_set_passphrase_type(original_type);
     return ret;

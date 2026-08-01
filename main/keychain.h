@@ -48,6 +48,7 @@ uint8_t keychain_get_userdata(void);
 
 // Temporarily cache mnemonic entropy (if using passphrase)
 void keychain_cache_mnemonic_entropy(const char* mnemonic);
+void keychain_clear_mnemonic_entropy(void);
 
 // Clear/set/get/compare the pinned/restricted network type
 void keychain_clear_network_type_restriction(void);

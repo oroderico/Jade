@@ -44,6 +44,7 @@ static inline bool awaiting_attestation_data(void) { return false; }
 #include "../ble/ble.h"
 #include "process/ota_defines.h"
 #include "process_utils.h"
+#include "mnemonic.h"
 
 #include <esp_ota_ops.h>
 
@@ -230,7 +231,6 @@ gui_activity_t* make_session_activity(void);
 gui_activity_t* make_ble_activity(gui_view_node_t** ble_status_item);
 
 // Wallet initialisation functions
-bool derive_keychain(bool temporary_restore, const char* mnemonic);
 void initialise_with_mnemonic(bool temporary_restore, bool force_qr_scan, bool* offer_qr_temporary);
 
 // Register a new otp code
@@ -829,14 +829,13 @@ static void select_initial_connection(const bool offer_qr_temporary)
 }
 
 // Called when the generic QR-scanner sees a valid mnemonic QR
-bool handle_mnemonic_qr(const char* mnemonic)
+derive_keychain_result_t handle_mnemonic_qr(const char* mnemonic)
 {
     JADE_ASSERT(mnemonic);
 
     const char* question[] = { "Wallet QR identified.", "Log out and switch", "wallets?" };
     if (!await_yesno_activity("Switch Wallet", question, 3, true, "blkstrm.com/temporary")) {
-        // User opted against - return true to show qr handled without processing error
-        return true;
+        return DERIVE_KEYCHAIN_CANCELLED;
     }
 
     // Log-out and switch to new wallet
@@ -844,9 +843,14 @@ bool handle_mnemonic_qr(const char* mnemonic)
     JADE_LOGI("Switching wallets - qrmode: %u", assume_qr_mode);
 
     const bool temporary_restore = true;
-    if (!derive_keychain(temporary_restore, mnemonic)) {
+    const derive_keychain_result_t derive_result = derive_keychain(temporary_restore, mnemonic);
+    if (derive_result != DERIVE_KEYCHAIN_SUCCESS) {
+        if (derive_result == DERIVE_KEYCHAIN_CANCELLED) {
+            JADE_LOGI("Wallet switch cancelled during passphrase entry");
+            return DERIVE_KEYCHAIN_CANCELLED;
+        }
         JADE_LOGE("Failed to derive new wallet to switch into");
-        return false;
+        return DERIVE_KEYCHAIN_FAILED;
     }
 
     // If the original wallet was in qrmode, remain in qr-mode, otherwise ask user
@@ -856,7 +860,7 @@ bool handle_mnemonic_qr(const char* mnemonic)
         select_initial_connection(!temporary_restore);
     }
 
-    return true;
+    return DERIVE_KEYCHAIN_SUCCESS;
 }
 
 // Helper to initialise with mnemonic, and (if successful) request whether the
@@ -1391,7 +1395,15 @@ static void handle_passphrase_prefs()
             while (true) {
                 gui_update_text(method_textbox, passphrase_method_desc_from_flags(type));
                 if (gui_activity_wait_event(act_method, GUI_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0)) {
-                    if (ev_id == GUI_WHEEL_LEFT_EVENT || ev_id == GUI_WHEEL_RIGHT_EVENT) {
+                    if (ev_id == GUI_WHEEL_LEFT_EVENT) {
+#ifdef CONFIG_HAS_CAMERA
+                        type = type == PASSPHRASE_FREETEXT ? PASSPHRASE_QR
+                            : type == PASSPHRASE_QR        ? PASSPHRASE_WORDLIST
+                                                           : PASSPHRASE_FREETEXT;
+#else
+                        type = (type == PASSPHRASE_FREETEXT ? PASSPHRASE_WORDLIST : PASSPHRASE_FREETEXT);
+#endif
+                    } else if (ev_id == GUI_WHEEL_RIGHT_EVENT) {
 #ifdef CONFIG_HAS_CAMERA
                         type = type == PASSPHRASE_FREETEXT ? PASSPHRASE_WORDLIST
                             : type == PASSPHRASE_WORDLIST  ? PASSPHRASE_QR

@@ -18,6 +18,7 @@
 #include "../utils/util.h"
 
 #include "process_utils.h"
+#include "mnemonic.h"
 
 #include <cdecoder.h>
 #include <ctype.h>
@@ -30,7 +31,6 @@
 #define BIP85_INDEX_MAX 1000000
 
 typedef enum { MNEMONIC_SIMPLE, MNEMONIC_ADVANCED, WORDLIST_PASSPHRASE } wordlist_purpose_t;
-typedef enum { DERIVE_KEYCHAIN_FAILED, DERIVE_KEYCHAIN_CANCELLED, DERIVE_KEYCHAIN_SUCCESS } derive_keychain_result_t;
 
 // main/ui/mnemonic.c
 gui_activity_t* make_mnemonic_setup_type_activity(void);
@@ -1212,19 +1212,35 @@ static void get_freetext_passphrase(char* passphrase, const size_t passphrase_le
     strcpy(passphrase, kb_entry.strdata);
 }
 
-bool is_valid_qr_passphrase(const uint8_t* data, const size_t data_len)
+const char* get_qr_passphrase_error(const uint8_t* data, const size_t data_len)
 {
-    if (!data || !data_len || data_len > PASSPHRASE_MAX_LEN || memchr(data, '\0', data_len)) {
-        return false;
+    if (!data || !data_len) {
+        return "@string/passphrase_qr_length";
     }
 
+    bool has_invalid_ascii = false;
     for (size_t i = 0; i < data_len; ++i) {
-        if (data[i] < 0x20 || data[i] > 0x7e) {
-            return false;
+        if (data[i] > 0x7f) {
+            return "@string/passphrase_qr_ascii_only";
+        }
+        if (data[i] < 0x20 || data[i] == 0x7f) {
+            has_invalid_ascii = true;
         }
     }
 
-    return true;
+    if (has_invalid_ascii) {
+        return "@string/passphrase_qr_invalid";
+    }
+    if (data_len > PASSPHRASE_MAX_LEN) {
+        return "@string/passphrase_qr_length";
+    }
+
+    return NULL;
+}
+
+bool is_valid_qr_passphrase(const uint8_t* data, const size_t data_len)
+{
+    return get_qr_passphrase_error(data, data_len) == NULL;
 }
 
 #ifdef CONFIG_HAS_CAMERA
@@ -1234,12 +1250,13 @@ static bool validate_qr_passphrase(qr_data_t* qr_data)
     JADE_ASSERT(qr_data->len < sizeof(qr_data->data));
     JADE_ASSERT(qr_data->data[qr_data->len] == '\0');
 
-    if (is_valid_qr_passphrase(qr_data->data, qr_data->len)) {
+    const char* const error = get_qr_passphrase_error(qr_data->data, qr_data->len);
+    if (!error) {
         return true;
     }
 
     qr_data->len = 0;
-    await_error("@string/passphrase_qr_invalid");
+    await_error(error);
     return false;
 }
 
@@ -1266,6 +1283,11 @@ static bool get_qr_passphrase(char* passphrase, const size_t passphrase_len)
         if (ev_id == BTN_YES) {
             memcpy(passphrase, qr_data.data, qr_data.len + 1);
             ret = true;
+        }
+
+        // Do not retain the passphrase in GUI-owned memory after confirmation.
+        gui_update_text(text_to_confirm, "");
+        if (ret) {
             break;
         }
 
@@ -1316,7 +1338,7 @@ bool get_passphrase(char* passphrase, const size_t passphrase_len)
     }
 }
 
-static derive_keychain_result_t derive_keychain_with_result(const bool temporary_restore, const char* mnemonic)
+derive_keychain_result_t derive_keychain(const bool temporary_restore, const char* mnemonic)
 {
     JADE_ASSERT(mnemonic);
     // NOTE: mnemnonic should be valid at this point for best UX
@@ -1357,11 +1379,6 @@ static derive_keychain_result_t derive_keychain_with_result(const bool temporary
 
     SENSITIVE_POP(&keydata);
     return DERIVE_KEYCHAIN_SUCCESS;
-}
-
-bool derive_keychain(const bool temporary_restore, const char* mnemonic)
-{
-    return derive_keychain_with_result(temporary_restore, mnemonic) == DERIVE_KEYCHAIN_SUCCESS;
 }
 
 void initialise_with_mnemonic(const bool temporary_restore, const bool force_qr_scan, bool* offer_qr_temporary)
@@ -1527,7 +1544,7 @@ void initialise_with_mnemonic(const bool temporary_restore, const bool force_qr_
     // (In advanced mode we ask the user, in default/basic mode we always silently export the key.)
     keychain_set_confirm_export_blinding_key(advanced_mode);
 
-    const derive_keychain_result_t derive_result = derive_keychain_with_result(temporary_restore, mnemonic);
+    const derive_keychain_result_t derive_result = derive_keychain(temporary_restore, mnemonic);
     if (derive_result != DERIVE_KEYCHAIN_SUCCESS) {
         if (derive_result == DERIVE_KEYCHAIN_FAILED) {
             JADE_LOGE("Failed to derive keychain from valid mnemonic");

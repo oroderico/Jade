@@ -17,6 +17,8 @@ strings = {
     'passphrase_method_qr': {'EN': 'QR Code'},
     'passphrase_qr_scan': {'EN': 'Scan Passphrase QR'},
     'passphrase_qr_invalid': {'EN': 'Invalid passphrase QR'},
+    'passphrase_qr_ascii_only': {'EN': 'Use ASCII characters only'},
+    'passphrase_qr_length': {'EN': 'Passphrase must be 1-100 characters'},
     'passphrase_qr_unavailable': {'EN': 'QR passphrase unavailable'},
 }
 

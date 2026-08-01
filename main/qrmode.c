@@ -13,6 +13,7 @@
 #include "multisig.h"
 #include "otpauth.h"
 #include "process.h"
+#include "process/mnemonic.h"
 #include "qrcode.h"
 #include "sensitive.h"
 #include "storage.h"
@@ -88,8 +89,6 @@ int sign_message_file(
 int get_bip85_bip39_entropy_cbor(const CborValue* params, CborEncoder* output, const char** errmsg);
 
 bool show_confirm_address_activity(const char* address, bool default_selection);
-
-bool handle_mnemonic_qr(const char* mnemonic);
 
 bool select_registered_wallet(const char multisig_names[][NVS_KEY_NAME_MAX_SIZE], size_t num_multisigs,
     const char descriptor_names[][NVS_KEY_NAME_MAX_SIZE], size_t num_descriptors, const char** wallet_name_out,
@@ -1055,7 +1054,7 @@ static bool handle_qr_bytes(const uint8_t* bytes, const size_t bytes_len)
         SENSITIVE_PUSH(mnemonic, sizeof(mnemonic));
         size_t written = 0;
         if (import_mnemonic(bytes, bytes_len, mnemonic, sizeof(mnemonic), &written) && written < sizeof(mnemonic)) {
-            if (!handle_mnemonic_qr(mnemonic)) {
+            if (handle_mnemonic_qr(mnemonic) == DERIVE_KEYCHAIN_FAILED) {
                 JADE_LOGE("Handling new scanned mnemonic failed");
                 await_error("Failed loading wallet");
                 SENSITIVE_POP(mnemonic);
@@ -1248,8 +1247,11 @@ static bool handle_bip39_qr(const uint8_t* cbor, const size_t cbor_len)
     SENSITIVE_PUSH(mnemonic, sizeof(mnemonic));
     size_t written = 0;
     bool ret = true;
-    if (!bcur_parse_bip39(cbor, cbor_len, mnemonic, sizeof(mnemonic), &written) || written >= sizeof(mnemonic)
-        || !handle_mnemonic_qr(mnemonic)) {
+    if (!bcur_parse_bip39(cbor, cbor_len, mnemonic, sizeof(mnemonic), &written) || written >= sizeof(mnemonic)) {
+        JADE_LOGE("Parsing scanned mnemonic data failed");
+        await_error("Failed loading wallet");
+        ret = false;
+    } else if (handle_mnemonic_qr(mnemonic) == DERIVE_KEYCHAIN_FAILED) {
         JADE_LOGE("Processing scanned mnemonic data failed");
         await_error("Failed loading wallet");
         ret = false;

@@ -13,10 +13,10 @@
 #include <sodium/utils.h>
 
 #include "process_utils.h"
+#include "mnemonic.h"
 
 // Wallet initialisation functions
 void initialise_with_mnemonic(bool temporary_restore, bool force_qr_scan, bool* offer_qr_temporary);
-bool get_passphrase(char* passphrase, size_t passphrase_len);
 
 // Pinserver interaction
 bool pinclient_get(
@@ -236,6 +236,7 @@ static bool get_pin_load_keys(jade_process_t* process, const bool suppress_pin_c
         // Get any passphrase that may be required
         if (!get_passphrase(passphrase, sizeof(passphrase))) {
             SENSITIVE_POP(passphrase);
+            keychain_clear_mnemonic_entropy();
             jade_process_reject_message(process, CBOR_RPC_USER_CANCELLED, "Passphrase entry cancelled");
             goto cleanup;
         }
@@ -244,6 +245,7 @@ static bool get_pin_load_keys(jade_process_t* process, const bool suppress_pin_c
 
         if (!keychain_complete_derivation_with_passphrase(passphrase)) {
             SENSITIVE_POP(passphrase);
+            keychain_clear_mnemonic_entropy();
             JADE_LOGE("Failed to derive wallet");
             jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Failed to derive wallet");
 

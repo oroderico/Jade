@@ -1,4 +1,6 @@
 #ifndef AMALGAMATED_BUILD
+#include <sdkconfig.h>
+
 #include "keychain.h"
 #include "aes.h"
 #include "jade_assert.h"
@@ -36,6 +38,12 @@ static size_t mnemonic_entropy_len = 0;
 // Cached key flags
 static uint8_t key_flags = 0;
 
+void keychain_clear_mnemonic_entropy(void)
+{
+    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
+    mnemonic_entropy_len = 0;
+}
+
 void keychain_set(const keychain_t* src, const uint8_t userdata, const bool temporary)
 {
     JADE_ASSERT(src);
@@ -52,8 +60,7 @@ void keychain_set(const keychain_t* src, const uint8_t userdata, const bool temp
     }
 
     // Clear any mnemonic entropy we may have been holding
-    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
-    mnemonic_entropy_len = 0;
+    keychain_clear_mnemonic_entropy();
 
     // Reload key flags
     key_flags = storage_get_key_flags();
@@ -73,8 +80,7 @@ void keychain_clear(void)
     }
 
     // Clear any mnemonic entropy we may have been holding
-    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
-    mnemonic_entropy_len = 0;
+    keychain_clear_mnemonic_entropy();
 
     // Reload key flags
     key_flags = storage_get_key_flags();
@@ -145,9 +151,15 @@ void keychain_set_passphrase_type(const passphrase_type_t type)
 passphrase_type_t keychain_get_passphrase_type(void)
 {
     const uint8_t type_flags = key_flags & (KEY_FLAGS_WORDLIST_PASSPHRASE | KEY_FLAGS_QR_PASSPHRASE);
+#ifdef CONFIG_HAS_CAMERA
     return type_flags == KEY_FLAGS_WORDLIST_PASSPHRASE ? PASSPHRASE_WORDLIST
         : type_flags == KEY_FLAGS_QR_PASSPHRASE        ? PASSPHRASE_QR
                                                        : PASSPHRASE_FREETEXT;
+#else
+    // A QR method may have been persisted by firmware built for a camera device.
+    // Fall back to Manual when this firmware cannot offer QR scanning.
+    return type_flags == KEY_FLAGS_WORDLIST_PASSPHRASE ? PASSPHRASE_WORDLIST : PASSPHRASE_FREETEXT;
+#endif
 }
 
 void keychain_set_confirm_export_blinding_key(const bool confirm_export)
