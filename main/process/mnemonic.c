@@ -1220,7 +1220,7 @@ static const char* get_qr_passphrase_error(const uint8_t* data, const size_t dat
 
     for (size_t i = 0; i < data_len; ++i) {
         if (data[i] < 0x20 || data[i] > 0x7e) {
-            return "Invalid passphrase QR";
+            return "Use printable ASCII only";
         }
     }
 
