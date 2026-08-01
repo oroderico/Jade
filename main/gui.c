@@ -2028,11 +2028,17 @@ static void render_text(gui_view_node_t* node, dispWin_t cs)
 
             uint16_t offset_x = 0;
             uint16_t offset_y = 0;
-            char buf[2] = { '\0', '\0' };
+            char buf[3] = { '\0', '\0', '\0' };
             for (size_t i = 0; i < node->render_data.resolved_text_length; ++i) {
                 buf[0] = node->render_data.resolved_text[i];
                 const int char_width = display_get_string_width(buf);
-                if (pos_x + offset_x + char_width >= cs.x2 - cs.x1) {
+                // A single-character width excludes the inter-glyph spacing used by the display renderer. Derive
+                // the real cursor advance from a two-character string so the noise and ordinary text paths agree.
+                buf[1] = buf[0];
+                const int char_advance = display_get_string_width(buf) - char_width;
+                buf[1] = '\0';
+
+                if (pos_x + offset_x + char_width > cs.x2 - cs.x1) {
                     offset_y += display_get_font_height();
                     offset_x = 0;
                 }
@@ -2043,7 +2049,7 @@ static void render_text(gui_view_node_t* node, dispWin_t cs)
                 _fg = color;
                 buf[0] = node->render_data.resolved_text[i];
                 display_print_in_area(buf, pos_x + offset_x, pos_y + offset_y, cs, 1);
-                offset_x += char_width;
+                offset_x += char_advance;
             }
         } else { // without noise
             _fg = node->is_selected ? node->text->selected_color : node->text->color;
