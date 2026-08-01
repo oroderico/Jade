@@ -17,8 +17,8 @@
 #include "../utils/network.h"
 #include "../utils/util.h"
 
-#include "process_utils.h"
 #include "mnemonic.h"
+#include "process_utils.h"
 
 #include <cdecoder.h>
 #include <ctype.h>

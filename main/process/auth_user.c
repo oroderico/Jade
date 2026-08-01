@@ -12,8 +12,8 @@
 
 #include <sodium/utils.h>
 
-#include "process_utils.h"
 #include "mnemonic.h"
+#include "process_utils.h"
 
 // Wallet initialisation functions
 void initialise_with_mnemonic(bool temporary_restore, bool force_qr_scan, bool* offer_qr_temporary);

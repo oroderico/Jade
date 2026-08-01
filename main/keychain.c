@@ -1,10 +1,10 @@
 #ifndef AMALGAMATED_BUILD
 #include <sdkconfig.h>
 
-#include "keychain.h"
 #include "aes.h"
 #include "jade_assert.h"
 #include "jade_wally_verify.h"
+#include "keychain.h"
 #include "random.h"
 #include "sensitive.h"
 #include "storage.h"

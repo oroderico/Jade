@@ -58,8 +58,7 @@ static bool test_qr_passphrase_validation(void)
     memset(non_ascii_too_long, 'a', sizeof(non_ascii_too_long));
     non_ascii_too_long[sizeof(non_ascii_too_long) - 1] = 0x80;
 
-    return is_valid_qr_passphrase(one_char, sizeof(one_char) - 1)
-        && is_valid_qr_passphrase(valid, sizeof(valid) - 1)
+    return is_valid_qr_passphrase(one_char, sizeof(one_char) - 1) && is_valid_qr_passphrase(valid, sizeof(valid) - 1)
         && is_valid_qr_passphrase(boundary_chars, sizeof(boundary_chars))
         && is_valid_qr_passphrase(spaced, sizeof(spaced) - 1) && is_valid_qr_passphrase(max_len, sizeof(max_len))
         && !is_valid_qr_passphrase(NULL, 0) && !is_valid_qr_passphrase(valid, 0)
@@ -78,7 +77,7 @@ static bool test_qr_passphrase_validation(void)
         && strcmp(get_qr_passphrase_error(non_ascii, sizeof(non_ascii)), "@string/passphrase_qr_ascii_only") == 0
         && strcmp(get_qr_passphrase_error(non_ascii_too_long, sizeof(non_ascii_too_long)),
                "@string/passphrase_qr_ascii_only")
-            == 0;
+        == 0;
 }
 
 static bool test_passphrase_type_flags(void)

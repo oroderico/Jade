@@ -42,9 +42,9 @@ static inline bool awaiting_attestation_data(void) { return false; }
 #endif
 
 #include "../ble/ble.h"
+#include "mnemonic.h"
 #include "process/ota_defines.h"
 #include "process_utils.h"
-#include "mnemonic.h"
 
 #include <esp_ota_ops.h>
 
