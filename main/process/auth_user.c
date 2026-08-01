@@ -236,7 +236,7 @@ static bool get_pin_load_keys(jade_process_t* process, const bool suppress_pin_c
         // Get any passphrase that may be required
         if (!get_passphrase(passphrase, sizeof(passphrase))) {
             SENSITIVE_POP(passphrase);
-            keychain_clear_mnemonic_entropy();
+            keychain_clear();
             jade_process_reject_message(process, CBOR_RPC_USER_CANCELLED, "Passphrase entry cancelled");
             goto cleanup;
         }
@@ -245,7 +245,7 @@ static bool get_pin_load_keys(jade_process_t* process, const bool suppress_pin_c
 
         if (!keychain_complete_derivation_with_passphrase(passphrase)) {
             SENSITIVE_POP(passphrase);
-            keychain_clear_mnemonic_entropy();
+            keychain_clear();
             JADE_LOGE("Failed to derive wallet");
             jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Failed to derive wallet");
 

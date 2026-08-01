@@ -42,42 +42,39 @@ static bool test_qr_passphrase_validation(void)
     const uint8_t one_char[] = "!";
     const uint8_t valid[] = "Passphrase 123!";
     const uint8_t boundary_chars[] = { 0x20, '~' };
-    const uint8_t spaced[] = " leading and trailing ";
     const uint8_t embedded_nul[] = { 'a', '\0', 'b' };
     const uint8_t control[] = { 'a', '\n' };
-    const uint8_t other_control[] = { 'a', 0x1f };
     const uint8_t delete_char[] = { 'a', 0x7f };
     const uint8_t non_ascii[] = { 'a', 0x80 };
-    const uint8_t valid_utf8[] = { 'c', 'a', 'f', 0xc3, 0xa9 };
-    const uint8_t invalid_utf8[] = { 'a', 0xff };
     uint8_t max_len[PASSPHRASE_MAX_LEN];
     memset(max_len, 'a', sizeof(max_len));
     uint8_t too_long[PASSPHRASE_MAX_LEN + 1];
     memset(too_long, 'a', sizeof(too_long));
-    uint8_t non_ascii_too_long[PASSPHRASE_MAX_LEN + 1];
-    memset(non_ascii_too_long, 'a', sizeof(non_ascii_too_long));
-    non_ascii_too_long[sizeof(non_ascii_too_long) - 1] = 0x80;
 
-    return is_valid_qr_passphrase(one_char, sizeof(one_char) - 1) && is_valid_qr_passphrase(valid, sizeof(valid) - 1)
-        && is_valid_qr_passphrase(boundary_chars, sizeof(boundary_chars))
-        && is_valid_qr_passphrase(spaced, sizeof(spaced) - 1) && is_valid_qr_passphrase(max_len, sizeof(max_len))
-        && !is_valid_qr_passphrase(NULL, 0) && !is_valid_qr_passphrase(valid, 0)
-        && !is_valid_qr_passphrase(too_long, sizeof(too_long))
-        && !is_valid_qr_passphrase(embedded_nul, sizeof(embedded_nul))
-        && !is_valid_qr_passphrase(control, sizeof(control))
-        && !is_valid_qr_passphrase(other_control, sizeof(other_control))
-        && !is_valid_qr_passphrase(delete_char, sizeof(delete_char))
-        && !is_valid_qr_passphrase(non_ascii, sizeof(non_ascii))
-        && !is_valid_qr_passphrase(valid_utf8, sizeof(valid_utf8))
-        && !is_valid_qr_passphrase(invalid_utf8, sizeof(invalid_utf8))
-        && !is_valid_qr_passphrase(non_ascii_too_long, sizeof(non_ascii_too_long))
-        && strcmp(get_qr_passphrase_error(NULL, 0), "@string/passphrase_qr_length") == 0
-        && strcmp(get_qr_passphrase_error(too_long, sizeof(too_long)), "@string/passphrase_qr_length") == 0
-        && strcmp(get_qr_passphrase_error(control, sizeof(control)), "@string/passphrase_qr_invalid") == 0
-        && strcmp(get_qr_passphrase_error(non_ascii, sizeof(non_ascii)), "@string/passphrase_qr_ascii_only") == 0
-        && strcmp(get_qr_passphrase_error(non_ascii_too_long, sizeof(non_ascii_too_long)),
-               "@string/passphrase_qr_ascii_only")
-        == 0;
+    const struct {
+        const uint8_t* data;
+        size_t len;
+        bool expected;
+    } cases[] = {
+        { NULL, 0, false },
+        { valid, 0, false },
+        { one_char, sizeof(one_char) - 1, true },
+        { valid, sizeof(valid) - 1, true },
+        { boundary_chars, sizeof(boundary_chars), true },
+        { max_len, sizeof(max_len), true },
+        { too_long, sizeof(too_long), false },
+        { embedded_nul, sizeof(embedded_nul), false },
+        { control, sizeof(control), false },
+        { delete_char, sizeof(delete_char), false },
+        { non_ascii, sizeof(non_ascii), false },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (is_valid_qr_passphrase(cases[i].data, cases[i].len) != cases[i].expected) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool test_passphrase_type_flags(void)

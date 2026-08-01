@@ -38,12 +38,6 @@ static size_t mnemonic_entropy_len = 0;
 // Cached key flags
 static uint8_t key_flags = 0;
 
-void keychain_clear_mnemonic_entropy(void)
-{
-    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
-    mnemonic_entropy_len = 0;
-}
-
 void keychain_set(const keychain_t* src, const uint8_t userdata, const bool temporary)
 {
     JADE_ASSERT(src);
@@ -60,7 +54,8 @@ void keychain_set(const keychain_t* src, const uint8_t userdata, const bool temp
     }
 
     // Clear any mnemonic entropy we may have been holding
-    keychain_clear_mnemonic_entropy();
+    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
+    mnemonic_entropy_len = 0;
 
     // Reload key flags
     key_flags = storage_get_key_flags();
@@ -80,7 +75,8 @@ void keychain_clear(void)
     }
 
     // Clear any mnemonic entropy we may have been holding
-    keychain_clear_mnemonic_entropy();
+    JADE_WALLY_VERIFY(wally_bzero(mnemonic_entropy, sizeof(mnemonic_entropy)));
+    mnemonic_entropy_len = 0;
 
     // Reload key flags
     key_flags = storage_get_key_flags();

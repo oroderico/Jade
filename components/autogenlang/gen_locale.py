@@ -5,21 +5,6 @@ strings = {
     'string_a': {'EN': 'EN_AAAAAA', 'IT': 'IT_AAAAA'},
     'string_b': {'EN': 'EN_BBBBBB'},
     'tt2': {'EN': 'EN_BBBBBB'},
-    'passphrase_title': {'EN': 'BIP39 Passphrase'},
-    'passphrase_frequency': {'EN': 'Frequency'},
-    'passphrase_method': {'EN': 'Method'},
-    'passphrase_always': {'EN': 'Always Ask'},
-    'passphrase_next_login': {'EN': 'Next Login'},
-    'passphrase_next_login_only': {'EN': 'Next Login Only'},
-    'passphrase_disabled': {'EN': 'Disabled'},
-    'passphrase_method_manual': {'EN': 'Manual'},
-    'passphrase_method_wordlist': {'EN': 'WordList'},
-    'passphrase_method_qr': {'EN': 'QR Code'},
-    'passphrase_qr_scan': {'EN': 'Scan Passphrase QR'},
-    'passphrase_qr_invalid': {'EN': 'Invalid passphrase QR'},
-    'passphrase_qr_ascii_only': {'EN': 'Use ASCII characters only'},
-    'passphrase_qr_length': {'EN': 'Passphrase must be 1-100 characters'},
-    'passphrase_qr_unavailable': {'EN': 'QR passphrase unavailable'},
 }
 
 num_buckets = 16

@@ -1212,27 +1212,16 @@ static void get_freetext_passphrase(char* passphrase, const size_t passphrase_le
     strcpy(passphrase, kb_entry.strdata);
 }
 
-const char* get_qr_passphrase_error(const uint8_t* data, const size_t data_len)
+static const char* get_qr_passphrase_error(const uint8_t* data, const size_t data_len)
 {
-    if (!data || !data_len) {
-        return "@string/passphrase_qr_length";
+    if (!data || !data_len || data_len > PASSPHRASE_MAX_LEN) {
+        return "Passphrase must be 1-100 characters";
     }
 
-    bool has_invalid_ascii = false;
     for (size_t i = 0; i < data_len; ++i) {
-        if (data[i] > 0x7f) {
-            return "@string/passphrase_qr_ascii_only";
+        if (data[i] < 0x20 || data[i] > 0x7e) {
+            return "Invalid passphrase QR";
         }
-        if (data[i] < 0x20 || data[i] == 0x7f) {
-            has_invalid_ascii = true;
-        }
-    }
-
-    if (has_invalid_ascii) {
-        return "@string/passphrase_qr_invalid";
-    }
-    if (data_len > PASSPHRASE_MAX_LEN) {
-        return "@string/passphrase_qr_length";
     }
 
     return NULL;
@@ -1244,6 +1233,13 @@ bool is_valid_qr_passphrase(const uint8_t* data, const size_t data_len)
 }
 
 #ifdef CONFIG_HAS_CAMERA
+static void clear_qr_passphrase(qr_data_t* qr_data)
+{
+    JADE_ASSERT(qr_data);
+    JADE_WALLY_VERIFY(wally_bzero(qr_data->data, sizeof(qr_data->data)));
+    qr_data->len = 0;
+}
+
 static bool validate_qr_passphrase(qr_data_t* qr_data)
 {
     JADE_ASSERT(qr_data);
@@ -1255,7 +1251,7 @@ static bool validate_qr_passphrase(qr_data_t* qr_data)
         return true;
     }
 
-    qr_data->len = 0;
+    clear_qr_passphrase(qr_data);
     await_error(error);
     return false;
 }
@@ -1271,8 +1267,8 @@ static bool get_qr_passphrase(char* passphrase, const size_t passphrase_len)
     SENSITIVE_PUSH(&qr_data, sizeof(qr_data));
 
     bool ret = false;
-    while (jade_camera_scan_qr(&qr_data, "@string/passphrase_qr_scan", QR_GUIDE_SHOW, "blkstrm.com/passphrase")
-        && qr_data.len) {
+    while (
+        jade_camera_scan_qr(&qr_data, "Scan Passphrase QR", QR_GUIDE_SHOW, "blkstrm.com/passphrase") && qr_data.len) {
         JADE_ASSERT(is_valid_qr_passphrase(qr_data.data, qr_data.len));
 
         gui_update_text(text_to_confirm, (const char*)qr_data.data);
@@ -1287,15 +1283,13 @@ static bool get_qr_passphrase(char* passphrase, const size_t passphrase_len)
 
         // Do not retain the passphrase in GUI-owned memory after confirmation.
         gui_update_text(text_to_confirm, "");
+        clear_qr_passphrase(&qr_data);
         if (ret) {
             break;
         }
-
-        // Do not derive with a value the user declined. Scan again instead.
-        qr_data.len = 0;
-        qr_data.data[0] = '\0';
     }
 
+    clear_qr_passphrase(&qr_data);
     SENSITIVE_POP(&qr_data);
     return ret;
 }
@@ -1329,7 +1323,7 @@ bool get_passphrase(char* passphrase, const size_t passphrase_len)
 #ifdef CONFIG_HAS_CAMERA
         return get_qr_passphrase(passphrase, passphrase_len);
 #else
-        await_error("@string/passphrase_qr_unavailable");
+        await_error("QR passphrase unavailable");
         return false;
 #endif
     default:
