@@ -48,51 +48,6 @@ static inline void switch_buffer(void)
 }
 #endif
 
-static inline void draw_bitmap(int x, int y, int w, int h, const uint16_t* color_data);
-
-#if defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
-#define DISPLAY_TOUCH_NAV_BUTTON_AREA 40
-#define DISPLAY_TOUCH_NAV_BUTTON_MARGIN 5
-#define DISPLAY_TOUCH_NAV_BUTTON_WIDTH 40
-static void draw_touch_nav_buttons(void)
-{
-    uint16_t line[CONFIG_DISPLAY_WIDTH] = { TFT_BLACK };
-    for (int16_t i = 0; i < DISPLAY_TOUCH_NAV_BUTTON_AREA; ++i) {
-        draw_bitmap(CONFIG_DISPLAY_OFFSET_X, CONFIG_DISPLAY_HEIGHT + i + CONFIG_DISPLAY_OFFSET_Y,
-            CONFIG_DISPLAY_WIDTH + CONFIG_DISPLAY_OFFSET_X, 1, line);
-    }
-
-    const int16_t nav_y1 = CONFIG_DISPLAY_HEIGHT + DISPLAY_TOUCH_NAV_BUTTON_MARGIN + CONFIG_DISPLAY_OFFSET_Y;
-    const int16_t nav_y2 = (CONFIG_DISPLAY_HEIGHT + (DISPLAY_TOUCH_NAV_BUTTON_AREA - DISPLAY_TOUCH_NAV_BUTTON_MARGIN))
-        + CONFIG_DISPLAY_OFFSET_Y;
-
-    const int16_t center = (CONFIG_DISPLAY_WIDTH / 2) + CONFIG_DISPLAY_OFFSET_X;
-    const int16_t left = DISPLAY_TOUCH_NAV_BUTTON_MARGIN + CONFIG_DISPLAY_OFFSET_X;
-    const int16_t right = (CONFIG_DISPLAY_WIDTH - DISPLAY_TOUCH_NAV_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X;
-    const int16_t half_width = DISPLAY_TOUCH_NAV_BUTTON_WIDTH / 2;
-
-    const struct {
-        const char* symbol;
-        int16_t x1;
-        int16_t x2;
-    } buttons[] = { { "H", left, left + DISPLAY_TOUCH_NAV_BUTTON_WIDTH },
-        { "J", center - half_width, center + half_width },
-        { "I", right - DISPLAY_TOUCH_NAV_BUTTON_WIDTH, right } };
-
-    display_set_font(JADE_SYMBOLS_16x16_FONT, NULL);
-    for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
-        const dispWin_t button_area
-            = { .x1 = buttons[i].x1, .y1 = nav_y1, .x2 = buttons[i].x2, .y2 = nav_y2 };
-        display_print_in_area(buttons[i].symbol, CENTER, CENTER, button_area, 0);
-    }
-    display_set_font(DEFAULT_FONT, NULL);
-}
-
-void display_touch_navbar_redraw(void) { draw_touch_nav_buttons(); }
-#else
-void display_touch_navbar_redraw(void) {}
-#endif
-
 static inline void draw_bitmap(int x, int y, int w, int h, const uint16_t* color_data)
 {
     // JADE_ASSERT(color_data == &_fg || color_data == disp_buf);
@@ -230,8 +185,7 @@ void display_fill_rect(int x, int y, int w, int h, color_t color)
         || ((y - CONFIG_DISPLAY_OFFSET_Y) + h > CONFIG_DISPLAY_HEIGHT)) {
         JADE_LOGE(
             "display_fill_rect called with bad params (ignored) x %d y %d w %d h %d color %u\n", x, y, w, h, color);
-#if !defined(CONFIG_BOARD_TYPE_M5_CORES3) && !defined(CONFIG_BOARD_TYPE_TTGO_TWATCHS3)                                 \
-    && !defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
+#if !DISPLAY_HAS_TOUCH_NAVBAR
         return;
 #endif
     }
@@ -275,13 +229,55 @@ static void display_clear(void)
         CONFIG_DISPLAY_OFFSET_X, CONFIG_DISPLAY_OFFSET_Y, CONFIG_DISPLAY_WIDTH, CONFIG_DISPLAY_HEIGHT, TFT_BLACK);
 }
 
+#if DISPLAY_HAS_TOUCH_NAVBAR
+#define TOUCH_BUTTON_MARGIN 5
+#define TOUCH_BUTTON_WIDTH 40
+/* The TwatchS3 and core s3 don't have buttons that can be used (just power and
+   reset)
+   but it has a touch panel, we use the area below the main display
+   to display 3 buttons (prev, OK, next), we handle this here rather than
+   in display_hw because we want to draw text inside the virtual buttons.
+   Called at startup and again whenever the display orientation is flipped,
+   as flipping remaps the panel and the navbar must be redrawn in place. */
+void display_touch_navbar_redraw(void)
+{
+    /* blank the bottom of the display with black */
+    uint16_t line[CONFIG_DISPLAY_WIDTH] = { TFT_BLACK };
+    for (int16_t i = 0; i < TOUCH_BUTTON_AREA; ++i) {
+        draw_bitmap(CONFIG_DISPLAY_OFFSET_X, CONFIG_DISPLAY_HEIGHT + i + CONFIG_DISPLAY_OFFSET_Y,
+            CONFIG_DISPLAY_WIDTH + CONFIG_DISPLAY_OFFSET_X, 1, line);
+    }
+
+    dispWin_t disp_win_virtual_buttons = { .x1 = TOUCH_BUTTON_MARGIN + CONFIG_DISPLAY_OFFSET_X,
+        .y1 = CONFIG_DISPLAY_HEIGHT + TOUCH_BUTTON_MARGIN + CONFIG_DISPLAY_OFFSET_Y,
+        .x2 = TOUCH_BUTTON_WIDTH + CONFIG_DISPLAY_OFFSET_X,
+        .y2 = (CONFIG_DISPLAY_HEIGHT + (TOUCH_BUTTON_AREA - TOUCH_BUTTON_MARGIN)) + CONFIG_DISPLAY_OFFSET_Y };
+
+    display_set_font(JADE_SYMBOLS_16x16_FONT);
+    display_print_in_area("H", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+    disp_win_virtual_buttons.x1 = ((CONFIG_DISPLAY_WIDTH / 2) + CONFIG_DISPLAY_OFFSET_X) - (TOUCH_BUTTON_WIDTH / 2);
+    disp_win_virtual_buttons.x2 = ((CONFIG_DISPLAY_WIDTH / 2) + CONFIG_DISPLAY_OFFSET_X) + (TOUCH_BUTTON_WIDTH / 2);
+    display_print_in_area("J", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+    disp_win_virtual_buttons.x1
+        = ((CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X) - TOUCH_BUTTON_WIDTH;
+    disp_win_virtual_buttons.x2 = (CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X;
+    display_print_in_area("I", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+    display_set_font(DEFAULT_FONT);
+}
+#endif
+
 void display_init(TaskHandle_t* gui_h)
 {
     JADE_LOGI("display/screen init");
     JADE_ASSERT(gui_h);
+#ifdef CONFIG_LIBJADE
+    if (*gui_h) {
+        return; // Already initialized
+    }
+#endif
     JADE_ASSERT(!*gui_h);
 
-    power_screen_on();
+    JADE_ASSERT(power_screen_on() == ESP_OK);
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
 #if defined(CONFIG_ETH_USE_OPENETH)
@@ -292,15 +288,8 @@ void display_init(TaskHandle_t* gui_h)
     JADE_ASSERT(gui_h);
     display_hw_init(gui_h);
 
-#if defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
-    /* The TwatchS3 and core s3 don't have buttons that can be used (just power and
-       reset)
-       but it has a touch panel, we use the bottom 40 pixels worth of height
-       to display 3 buttons (prev, OK, next), we handle this here rather than
-       in display_hw because we want to draw text inside the virtual buttons */
-
+#if DISPLAY_HAS_TOUCH_NAVBAR
     vTaskDelay(50 / portTICK_PERIOD_MS);
-
     display_touch_navbar_redraw();
     vTaskDelay(50 / portTICK_PERIOD_MS);
 #endif
@@ -463,9 +452,9 @@ typedef struct {
     int xOffset;
     int xDelta;
     uint16_t dataPtr;
-} propFont;
+} PropFont;
 
-static propFont fontChar;
+static PropFont fontChar;
 
 #ifdef CONFIG_DISPLAY_FULL_FRAME_BUFFER
 uint16_t* get_display_buffer_at(int x, int y)
@@ -487,7 +476,7 @@ static inline bool get_icon_pixel(uint16_t x, uint16_t y, uint16_t width, const 
     return (icon->data[elem] >> bit) & 1;
 }
 
-void display_icon(const Icon* imgbuf, int x, int y, color_t color, dispWin_t area, const color_t* bg_color)
+void display_icon(const Icon* imgbuf, int x, int y, color_t color, const dispWin_t* const cs, const color_t* bg_color)
 {
     JADE_ASSERT(imgbuf);
 
@@ -497,8 +486,8 @@ void display_icon(const Icon* imgbuf, int x, int y, color_t color, dispWin_t are
     const uint16_t width = imgbuf->width;
     const uint16_t height = imgbuf->height;
 
-    const uint16_t draw_width = min(width, area.x2 - area.x1);
-    const uint16_t draw_height = min(height, area.y2 - area.y1);
+    const uint16_t draw_width = min(width, cs->x2 - cs->x1);
+    const uint16_t draw_height = min(height, cs->y2 - cs->y1);
 
 #ifndef CONFIG_DISPLAY_FULL_FRAME_BUFFER
     uint16_t start_x = 0;
@@ -506,25 +495,25 @@ void display_icon(const Icon* imgbuf, int x, int y, color_t color, dispWin_t are
 #endif
 
     if (x == RIGHT) {
-        x = area.x2 - draw_width;
+        x = cs->x2 - draw_width;
     } else if (x == CENTER) {
-        x = ((area.x2 - area.x1 - draw_width) / 2) + area.x1;
+        x = ((cs->x2 - cs->x1 - draw_width) / 2) + cs->x1;
 #ifndef CONFIG_DISPLAY_FULL_FRAME_BUFFER
         start_x = (width - draw_width) / 2;
 #endif
     } else {
-        x = x + area.x1;
+        x = x + cs->x1;
     }
 
     if (y == BOTTOM) {
-        y = area.y2 - draw_height;
+        y = cs->y2 - draw_height;
     } else if (y == CENTER) {
-        y = ((area.y2 - area.y1 - draw_height) / 2) + area.y1;
+        y = ((cs->y2 - cs->y1 - draw_height) / 2) + cs->y1;
 #ifndef CONFIG_DISPLAY_FULL_FRAME_BUFFER
         start_y = (height - draw_height) / 2;
 #endif
     } else {
-        y = y + area.y1;
+        y = y + cs->y1;
     }
 
 #ifdef CONFIG_DISPLAY_FULL_FRAME_BUFFER
@@ -624,35 +613,29 @@ static int print_proportional_char(int x, int y)
     return char_width;
 }
 
-static uint8_t get_char_ptr(const uint8_t c)
+static uint8_t get_char_ptr(const uint8_t c, PropFont* char_out)
 {
-    uint16_t tempPtr = 4;
+    const uint8_t* font_data = cfont.font + 4;
 
-    do {
-        fontChar.charCode = cfont.font[tempPtr++];
-        if (fontChar.charCode == 0xFF) {
-            return 0;
+    while (*font_data != c && *font_data != 0xff) {
+        if (font_data[2]) {
+            // Non-zero width character. Skip packed glyph bitmap data.
+            font_data += (((int)font_data[2] * font_data[3] - 1) / 8) + 1;
         }
-
-        fontChar.adjYOffset = cfont.font[tempPtr++];
-        fontChar.width = cfont.font[tempPtr++];
-        fontChar.height = cfont.font[tempPtr++];
-        fontChar.xOffset = cfont.font[tempPtr++];
-        fontChar.xOffset = fontChar.xOffset < 0x80 ? fontChar.xOffset : -(0xFF - fontChar.xOffset);
-        fontChar.xDelta = cfont.font[tempPtr++];
-
-        if (c != fontChar.charCode && fontChar.charCode != 0xFF) {
-            if (fontChar.width != 0) {
-                tempPtr += (((fontChar.width * fontChar.height) - 1) / 8) + 1;
-            }
-        }
-    } while ((c != fontChar.charCode) && (fontChar.charCode != 0xFF));
-
-    fontChar.dataPtr = tempPtr;
-    if (c != fontChar.charCode) {
-        return 0;
+        font_data += 6;
     }
-
+    if (*font_data == 0xff) {
+        return 0; // Not found
+    }
+    // Found, copy data
+    char_out->charCode = *font_data++;
+    char_out->adjYOffset = *font_data++;
+    char_out->width = *font_data++;
+    char_out->height = *font_data++;
+    char_out->xOffset = *font_data++;
+    char_out->xOffset = fontChar.xOffset < 0x80 ? fontChar.xOffset : -(0xFF - fontChar.xOffset);
+    char_out->xDelta = *font_data++;
+    char_out->dataPtr = font_data - cfont.font;
     return 1;
 }
 
@@ -692,7 +675,7 @@ int display_get_string_width(const char* str)
     int charWidth, xDelta;
 
     while (*tempStrptr) {
-        if (get_char_ptr(*tempStrptr++)) {
+        if (get_char_ptr(*tempStrptr++, &fontChar)) {
             charWidth = fontChar.width;
             xDelta = fontChar.xDelta;
             strWidth += ((charWidth > xDelta) ? charWidth : xDelta) + 1;
@@ -759,56 +742,60 @@ static void get_max_width_height(void)
     cfont.size = tempPtr;
 }
 
-void display_set_font(uint8_t font, const char* font_file)
+void display_set_font(const uint8_t font)
 {
-    cfont.font = NULL;
+    const uint8_t* font_data;
 
     if (font == DEJAVU18_FONT) {
-        cfont.font = tft_Dejavu18;
+        font_data = tft_Dejavu18;
     } else if (font == DEJAVU24_FONT) {
-        cfont.font = tft_Dejavu24;
+        font_data = tft_Dejavu24;
     } else if (font == UBUNTU16_FONT) {
-        cfont.font = tft_Ubuntu16;
+        font_data = tft_Ubuntu16;
     } else if (font == COMIC24_FONT) {
-        cfont.font = tft_Comic24;
+        font_data = tft_Comic24;
     } else if (font == MINYA24_FONT) {
-        cfont.font = tft_minya24;
+        font_data = tft_minya24;
     } else if (font == TOONEY32_FONT) {
-        cfont.font = tft_tooney32;
+        font_data = tft_tooney32;
     } else if (font == SMALL_FONT) {
-        cfont.font = tft_SmallFont;
+        font_data = tft_SmallFont;
     } else if (font == DEF_SMALL_FONT) {
-        cfont.font = tft_def_small;
+        font_data = tft_def_small;
     } else if (font == BIG_FONT) {
-        cfont.font = tft_BigFont;
+        font_data = tft_BigFont;
     } else if (font == SINCLAIR_M) {
-        cfont.font = tft_Sinclair_M;
+        font_data = tft_Sinclair_M;
     } else if (font == SINCLAIR_S) {
-        cfont.font = tft_Sinclair_S;
+        font_data = tft_Sinclair_S;
     } else if (font == RETRO_8X16) {
-        cfont.font = tft_Retro8x16;
+        font_data = tft_Retro8x16;
     } else if (font == VARIOUS_SYMBOLS_FONT) {
-        cfont.font = tft_various_symbols;
+        font_data = tft_various_symbols;
     } else if (font == VARIOUS_SYMBOLS_32_FONT) {
-        cfont.font = tft_Various_Symbols_32x32;
+        font_data = tft_Various_Symbols_32x32;
     } else if (font == BATTERY_FONT) {
-        cfont.font = tft_Battery_24x48;
+        font_data = tft_Battery_24x48;
     } else if (font == JADE_SYMBOLS_16x16_FONT) {
-        cfont.font = jade_symbols_16x16;
+        font_data = jade_symbols_16x16;
     } else if (font == JADE_SYMBOLS_16x32_FONT) {
-        cfont.font = jade_symbols_16x32;
+        font_data = jade_symbols_16x32;
     } else if (font == JADE_SYMBOLS_24x24_FONT) {
-        cfont.font = jade_symbols_24x24;
+        font_data = jade_symbols_24x24;
     } else {
-        cfont.font = tft_DefaultFont;
+        font_data = tft_DefaultFont;
     }
 
+    if (font_data == cfont.font && cfont.max_x_size) {
+        return;
+    }
+    cfont.font = font_data;
     cfont.bitmap = 1;
-    cfont.x_size = cfont.font[0];
-    cfont.y_size = cfont.font[1];
+    cfont.x_size = font_data[0];
+    cfont.y_size = font_data[1];
     if (cfont.x_size > 0) {
-        cfont.offset = cfont.font[2];
-        cfont.numchars = cfont.font[3];
+        cfont.offset = font_data[2];
+        cfont.numchars = font_data[3];
         cfont.size = cfont.x_size * cfont.y_size * cfont.numchars;
     } else {
         cfont.offset = 4;
@@ -819,9 +806,9 @@ void display_set_font(uint8_t font, const char* font_file)
 #define LASTX 7000
 #define LASTY 8000
 
-void display_print_in_area(const char* st, int x, int y, dispWin_t areaWin, bool wrap)
+void display_print_in_area(const char* st, int x, int y, const dispWin_t* const cs, bool wrap)
 {
-    if (!cfont.bitmap) {
+    if (!cfont.bitmap || !*st) {
         return;
     }
     int TFT_X = 0;
@@ -830,38 +817,38 @@ void display_print_in_area(const char* st, int x, int y, dispWin_t areaWin, bool
     if ((x >= LASTX) && (x < LASTY)) {
         x = TFT_X + (x - LASTX);
     } else if (x > CENTER) {
-        x += areaWin.x1;
+        x += cs->x1;
     }
 
     if (y >= LASTY) {
         y = TFT_Y + (y - LASTY);
     } else if (y > CENTER) {
-        y += areaWin.y1;
+        y += cs->y1;
     }
 
-    int stl = strlen(st);
+    const int stl = strlen(st);
     int tmpw = display_get_string_width(st);
     int fh = cfont.y_size;
 
     if (x == RIGHT) {
-        x = areaWin.x2 - tmpw;
+        x = cs->x2 - tmpw;
     } else if (x == CENTER) {
-        x = ((areaWin.x2 - areaWin.x1 - tmpw) / 2) + areaWin.x1;
+        x = ((cs->x2 - cs->x1 - tmpw) / 2) + cs->x1;
     }
 
     if (y == BOTTOM) {
-        y = areaWin.y2 - fh;
+        y = cs->y2 - fh;
     } else if (y == CENTER) {
-        y = ((areaWin.y2 - areaWin.y1 - fh) / 2) + areaWin.y1;
+        y = ((cs->y2 - cs->y1 - fh) / 2) + cs->y1;
     }
 
-    if (x < areaWin.x1) {
-        x = areaWin.x1;
+    if (x < cs->x1) {
+        x = cs->x1;
     }
-    if (y < areaWin.y1) {
-        y = areaWin.y1;
+    if (y < cs->y1) {
+        y = cs->y1;
     }
-    if ((x > areaWin.x2) || (y > areaWin.y2)) {
+    if ((x > cs->x2) || (y > cs->y2)) {
         return;
     }
 
@@ -873,7 +860,7 @@ void display_print_in_area(const char* st, int x, int y, dispWin_t areaWin, bool
     tmpw = cfont.x_size;
     int tmph = cfont.y_size;
 
-    if ((TFT_Y + tmph - 1) > areaWin.y2) {
+    if ((TFT_Y + tmph - 1) > cs->y2) {
         return;
     }
 
@@ -885,29 +872,29 @@ void display_print_in_area(const char* st, int x, int y, dispWin_t areaWin, bool
         if (ch == 0x0A) {
             if (cfont.bitmap == 1) {
                 TFT_Y += tmph;
-                if (TFT_Y > (areaWin.y2 - tmph)) {
+                if (TFT_Y > (cs->y2 - tmph)) {
                     break;
                 }
-                TFT_X = areaWin.x1;
+                TFT_X = cs->x1;
             }
         } else {
             if (!cfont.x_size) {
-                if (get_char_ptr(ch)) {
+                if (get_char_ptr(ch, &fontChar)) {
                     tmpw = fontChar.xDelta;
                 } else {
                     continue;
                 }
             }
 
-            if ((TFT_X + tmpw) > (areaWin.x2)) {
+            if ((TFT_X + tmpw) > (cs->x2)) {
                 if (!wrap) {
                     break;
                 }
                 TFT_Y += tmph;
-                if (TFT_Y > (areaWin.y2 - tmph)) {
+                if (TFT_Y > (cs->y2 - tmph)) {
                     break;
                 }
-                TFT_X = areaWin.x1;
+                TFT_X = cs->x1;
             }
 
             if (!cfont.x_size) {
@@ -941,7 +928,7 @@ static const uint16_t gray_565[64] = { GS(0), GS(4), GS(8), GS(12), GS(16), GS(2
 #undef GS_CPU
 #undef GS
 
-void display_picture(const Picture* imgbuf, int x, int y, dispWin_t area)
+void display_picture(const Picture* imgbuf, int x, int y, const dispWin_t* cs)
 {
     JADE_ASSERT(imgbuf);
 
@@ -953,25 +940,25 @@ void display_picture(const Picture* imgbuf, int x, int y, dispWin_t area)
 
     switch (x) {
     case CENTER:
-        calculatedx = ((area.x2 - area.x1 - imgbuf->width) / 2) + area.x1;
+        calculatedx = ((cs->x2 - cs->x1 - imgbuf->width) / 2) + cs->x1;
         break;
     case RIGHT:
-        calculatedx = area.x2 - imgbuf->width;
+        calculatedx = cs->x2 - imgbuf->width;
         break;
     default:
-        calculatedx = x + area.x1;
+        calculatedx = x + cs->x1;
         break;
     }
 
     switch (y) {
     case CENTER:
-        calculatedy = ((area.y2 - area.y1 - imgbuf->height) / 2) + area.y1;
+        calculatedy = ((cs->y2 - cs->y1 - imgbuf->height) / 2) + cs->y1;
         break;
     case BOTTOM:
-        calculatedy = area.y2 - imgbuf->height;
+        calculatedy = cs->y2 - imgbuf->height;
         break;
     default:
-        calculatedy = y + area.y1;
+        calculatedy = y + cs->y1;
         break;
     }
 

@@ -51,7 +51,7 @@ void get_commitments_process(void* process_ptr)
         goto cleanup;
     }
 
-    bool ret = rpc_get_uint64_t("value", &params, &ec.c.value);
+    bool ret = rpc_get_uint64("value", &params, &ec.c.value);
     if (!ret) {
         jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract value from parameters");
         goto cleanup;
@@ -60,7 +60,7 @@ void get_commitments_process(void* process_ptr)
     // hash-prevouts and output index are needed to generate deterministic blinding factors
     size_t hash_prevouts_len = 0;
     const uint8_t* hash_prevouts = NULL;
-    size_t output_index = 0;
+    uint32_t output_index = 0;
     if (!params_hashprevouts_outputindex(&params, &hash_prevouts, &hash_prevouts_len, &output_index, &errmsg)) {
         jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
         goto cleanup;
@@ -123,7 +123,7 @@ void get_commitments_process(void* process_ptr)
     }
 
     uint8_t buf[320];
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &ec, reply_commitments);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), &ec, reply_commitments);
 
     JADE_LOGI("Success");
 

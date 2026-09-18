@@ -67,7 +67,7 @@ void get_shared_nonce_process(void* process_ptr)
     size_t blinding_pubkey_len = 0;
     if (rpc_has_field_data("include_pubkey", &params)) {
         bool include_pubkey = false;
-        if (!rpc_get_boolean("include_pubkey", &params, &include_pubkey)) {
+        if (!rpc_get_bool("include_pubkey", &params, &include_pubkey)) {
             jade_process_reject_message(
                 process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract valid pubkey flag from parameters");
             goto cleanup;
@@ -104,10 +104,10 @@ void get_shared_nonce_process(void* process_ptr)
             .shared_nonce_len = sizeof(shared_nonce),
             .pubkey = p_blinding_pubkey,
             .pubkey_len = blinding_pubkey_len };
-        jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &data, reply_nonce_and_pubkey);
+        jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), &data, reply_nonce_and_pubkey);
     } else {
         // Just shared blinding nonce alone (default/legacy behaviour)
-        jade_process_reply_to_message_bytes(process->ctx, shared_nonce, sizeof(shared_nonce));
+        jade_process_reply_to_message_bytes(&process->ctx, shared_nonce, sizeof(shared_nonce));
     }
     JADE_LOGI("Success");
 

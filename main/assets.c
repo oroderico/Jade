@@ -1,4 +1,6 @@
 #ifndef AMALGAMATED_BUILD
+#include <inttypes.h>
+
 #include "assets.h"
 #include "jade_assert.h"
 #include "jade_wally_verify.h"
@@ -15,7 +17,7 @@
 
 // Compute the asset-id given the contract hash and the issuance prevout details
 static void compute_asset_id(const uint8_t* contract_hash, const size_t contract_hash_len, const uint8_t* txhash,
-    const size_t txhash_len, const size_t index, uint8_t* assetid, const size_t assetid_len)
+    const size_t txhash_len, const uint32_t index, uint8_t* assetid, const size_t assetid_len)
 {
     JADE_ASSERT(contract_hash);
     JADE_ASSERT(contract_hash_len == SHA256_LEN);
@@ -47,9 +49,11 @@ static bool get_asset_contract_hash(const CborValue* contract, uint8_t* contract
 
     char contract_json[ASSET_CONTRACT_BUFFER_LEN];
     FILE* const fstr = fmemopen((uint8_t*)contract_json, sizeof(contract_json), "w");
-    if (cbor_value_to_json(fstr, contract, CborConvertDefaultFlags) != CborNoError) {
+    if (!fstr || cbor_value_to_json(fstr, contract, CborConvertDefaultFlags) != CborNoError) {
         JADE_LOGE("Failed to convert asset contract data to json");
-        fclose(fstr);
+        if (fstr) {
+            fclose(fstr);
+        }
         return false;
     }
     fclose(fstr);
@@ -131,8 +135,8 @@ bool assets_get_allocate(const char* field, const CborValue* value, asset_info_t
             }
             reverse_in_place(txhash, sizeof(txhash));
 
-            size_t index;
-            if (!rpc_get_sizet("vout", &issuanceprevout, &index)) {
+            uint32_t index;
+            if (!rpc_get_uint32("vout", &issuanceprevout, &index)) {
                 free(assets);
                 return false;
             }
@@ -166,9 +170,14 @@ bool assets_get_allocate(const char* field, const CborValue* value, asset_info_t
                 rpc_get_string_ptr("domain", &entity, &asset->issuer_domain, &asset->issuer_domain_len);
             }
 
-            size_t precision = 0;
-            rpc_get_sizet("precision", &contract, &precision);
-            asset->precision = precision;
+            // "precision" field is optional in the asset contract and defaults to 0
+            const uint32_t precision = rpc_get_uint32_or("precision", &contract, 0);
+            if (precision > ASSET_PRECISION_MAX) {
+                JADE_LOGE("Invalid asset precision %" PRIu32, precision);
+                free(assets);
+                return false;
+            }
+            asset->precision = (uint8_t)precision;
         }
 
         CborError err = cbor_value_advance(&arrayItem);

@@ -165,7 +165,7 @@ static bool is_green_multisig_signers(const network_t network_id, const key_iter
 
     // If the backend path matches then this is a Green multisig
     return ga_path_len == expected_ga_path_len
-        && sodium_memcmp(expected_ga_path, ga_path, ga_path_len * sizeof(ga_path[0]));
+        && !sodium_memcmp(expected_ga_path, ga_path, ga_path_len * sizeof(ga_path[0]));
 }
 
 // Generate a green-multisig script, and compare it to the target script provided.
@@ -363,8 +363,18 @@ static bool verify_descriptor_script_matches(const char* descriptor_name, const 
 
     // Ensure number of pubkeys is not less than the number of xpub signers
     // (xpubs can be reused with different paths, but they cannot be left unused)
+    // Note: for Elements confidential descriptors, @B is the blinding key (not a signing xpub),
+    // so we count only values that are NOT the blinding-key placeholder.
+    size_t num_signing_values = 0;
+    for (size_t i = 0; i < descriptor->num_values; ++i) {
+        const string_value_t* const val = &descriptor->values[i];
+        const bool is_blinding_key = val->key_len == 2 && !strncmp(val->key, "@B", 2);
+        if (!is_blinding_key) {
+            ++num_signing_values;
+        }
+    }
     const size_t num_keys = key_iter_get_num_keys(iter);
-    if (descriptor->num_values > num_keys) {
+    if (num_signing_values > num_keys) {
         JADE_LOGD("Mismatch in number of signatories");
         return false;
     }
@@ -494,7 +504,6 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
 
     const bool is_liquid = network_is_liquid(network_id);
     JADE_ASSERT(!multisig_data || !descriptor); // cannot have both
-    JADE_ASSERT(!is_liquid || !descriptor); // atm do not support liquid descriptors
 
     key_iter iter; // Holds any public key in use
 
@@ -518,7 +527,8 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
                 outinfo->flags |= OUTPUT_FLAG_HAS_BLINDING_KEY;
             }
 
-            if (wally_psbt_get_output_amount(psbt, index, &outinfo->value) == WALLY_OK
+            if (wally_psbt_has_output_amount(psbt, index, &written) == WALLY_OK && written
+                && wally_psbt_get_output_amount(psbt, index, &outinfo->value) == WALLY_OK
                 && wally_psbt_get_output_asset(psbt, index, outinfo->asset_id, sizeof(outinfo->asset_id), &written)
                     == WALLY_OK
                 && written) {
@@ -531,16 +541,17 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
                 // Fee output
                 JADE_ASSERT(!(outinfo->flags & OUTPUT_FLAG_CONFIDENTIAL));
                 JADE_ASSERT(outinfo->flags & OUTPUT_FLAG_HAS_UNBLINDED);
-                // Fee outputs can't be change, so may as well skip now
-                JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_VALIDATED | OUTPUT_FLAG_CHANGE)));
+                // Fee outputs can't be ours or change: skip further processing
+                JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_IS_OURS | OUTPUT_FLAG_CHANGE)));
                 continue;
             }
         }
 
         JADE_LOGD("Considering output %u for change", index);
 
-        // By default, assume not a validated or change output, and so user must verify
-        JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_VALIDATED | OUTPUT_FLAG_CHANGE)));
+        // Initially we assume the output isn't a wallet output or wallet
+        // change, so the user must explicitly confirm it.
+        JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_IS_OURS | OUTPUT_FLAG_CHANGE)));
 
         // Find the first key belonging to this signer
         if (!key_iter_output_begin_public(psbt, index, &iter)) {
@@ -596,7 +607,7 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
             JADE_LOGI("Output %u singlesig %s path/script validated", index, is_change ? "change" : "receive");
 
             // Set appropriate flags
-            outinfo->flags |= OUTPUT_FLAG_VALIDATED;
+            outinfo->flags |= OUTPUT_FLAG_IS_OURS;
             if (is_change) {
                 outinfo->flags |= OUTPUT_FLAG_CHANGE;
             }
@@ -623,8 +634,8 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
                 continue;
             }
 
-            if (!iter.is_ga_2of3_recovery_key
-                && !verify_ga_script_matches(
+            if (iter.is_ga_2of3_recovery_key
+                || !verify_ga_script_matches(
                     network_id, &iter.hdkey, recovery_p, path, path_len, tx_script, tx_script_len)) {
                 // Not able to verify that output belongs to green 2of3 when Jade matches recovery key
                 // as backend path is calculated from user key.
@@ -636,7 +647,7 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
             JADE_LOGI("Output %u green-multisig path/script validated", index);
 
             // Set appropriate flags - note Green wallet-output is always assumed to be change
-            outinfo->flags |= (OUTPUT_FLAG_VALIDATED | OUTPUT_FLAG_CHANGE);
+            outinfo->flags |= (OUTPUT_FLAG_IS_OURS | OUTPUT_FLAG_CHANGE);
 
         } else if (signing_flags == (PSBT_SIGNING_MULTISIG | PSBT_SIGNING_SINGLE_MULTISIG_RECORD)) {
             // Generic multisig or descriptor
@@ -666,7 +677,7 @@ static bool psbt_update_outputs(const network_t network_id, struct wally_psbt* p
                 wallet_name);
 
             // Set appropriate flags
-            outinfo->flags |= OUTPUT_FLAG_VALIDATED;
+            outinfo->flags |= OUTPUT_FLAG_IS_OURS;
             if (is_change) {
                 outinfo->flags |= OUTPUT_FLAG_CHANGE;
             }
@@ -721,18 +732,17 @@ int sign_psbt(jade_process_t* process, CborValue* params, const network_t networ
         return CBOR_RPC_BAD_PARAMETERS;
     }
     const bool for_liquid = is_elements;
-    bool has_genesis_blockhash = false;
+    // Liquid: Optional ELIP-0101 genesis blockhash can override test network defaults.
+    // Defers to params_genesis_hash() for validation (only needed for Lisuid/PSET).
+    size_t has_genesis_blockhash = 0;
     if (for_liquid) {
-        // Liquid: Check ELIP-0101 genesis blockhash
-        size_t has_genesis = 0;
-        JADE_WALLY_VERIFY(wally_psbt_has_global_genesis_blockhash(psbt, &has_genesis));
-        has_genesis_blockhash = has_genesis;
-        if (has_genesis_blockhash) {
-            uint8_t genesis[SHA256_LEN];
-            network_to_genesis_hash(network_id, genesis, sizeof(genesis));
-            if (memcmp(psbt->genesis_blockhash, genesis, sizeof(genesis))) {
-                *errmsg = "Network/pset genesis mismatch";
-            }
+        JADE_WALLY_VERIFY(wally_psbt_has_global_genesis_blockhash(psbt, &has_genesis_blockhash));
+        const uint8_t* psbt_genesis = has_genesis_blockhash ? psbt->genesis_blockhash : NULL;
+        const size_t psbt_genesis_len = has_genesis_blockhash ? sizeof(psbt->genesis_blockhash) : 0;
+        params_genesis_hash(network_id, for_liquid, psbt_genesis, psbt_genesis_len, psbt->genesis_blockhash,
+            sizeof(psbt->genesis_blockhash), errmsg);
+        if (*errmsg) {
+            return CBOR_RPC_BAD_PARAMETERS;
         }
     }
 
@@ -824,7 +834,11 @@ int sign_psbt(jade_process_t* process, CborValue* params, const network_t networ
             // TODO: additional_info should store asset_ids in binary order,
             // so we shouldn't have to reverse_in_place() here
             reverse_in_place(asset_id, sizeof(asset_id));
-            asset_summary_update(in_sums, num_in_sums, asset_id, sizeof(asset_id), input->amount);
+            if (!asset_summary_update(in_sums, num_in_sums, asset_id, sizeof(asset_id), input->amount)) {
+                *errmsg = "Failed to validate input/output summary information";
+                retval = CBOR_RPC_BAD_PARAMETERS;
+                goto cleanup;
+            }
         }
 
         uint32_t sig_type;
@@ -920,8 +934,7 @@ int sign_psbt(jade_process_t* process, CborValue* params, const network_t networ
                     multisig_data = NULL;
                 }
 
-                // NOTE: descriptors not supported for elements atm
-                if (!multisig_data && !for_liquid) {
+                if (!multisig_data && (!for_liquid || descriptor_allow_liquid())) {
                     descriptor = JADE_MALLOC(sizeof(descriptor_data_t));
                     if (get_suitable_descriptor_record(&iter, &path[path_tail_start], path_tail_len, utxo->script,
                             utxo->script_len, network_id, wallet_name, sizeof(wallet_name), descriptor)) {
@@ -1038,18 +1051,12 @@ int sign_psbt(jade_process_t* process, CborValue* params, const network_t networ
 
     // Show warning if nothing to sign
     if (!signing_flags) {
-        const char* message[] = { "There are no relevant", "inputs to be signed" };
-        await_message_activity(message, 2);
+        await_message_2("There are no relevant", "inputs to be signed");
     }
 
     display_processing_message_activity();
 
     // Sign our inputs
-    if (signing_flags && for_liquid && !has_genesis_blockhash) {
-        // Liquid: Provide the ELIP-0101 genesis blockhash when signing
-        network_to_genesis_hash(network_id, psbt->genesis_blockhash, sizeof(psbt->genesis_blockhash));
-    }
-
     JADE_WALLY_VERIFY(wally_psbt_signing_cache_enable(psbt, 0));
 
     for (size_t index = 0; index < psbt->num_inputs; ++index) {
@@ -1103,6 +1110,13 @@ int sign_psbt(jade_process_t* process, CborValue* params, const network_t networ
     JADE_ASSERT(!retval);
 
 cleanup:
+    if (!signing_flags && for_liquid && !has_genesis_blockhash) {
+        // Liquid: We didn't sign any inputs and the user didn't provide an
+        // ELIP-0101 genesis blockhash, so remove it from the result PSET.
+        // Note if we did sign, then per ELIP-0101 we keep any added genesis hash.
+        JADE_WALLY_VERIFY(wally_bzero(psbt->genesis_blockhash, sizeof(psbt->genesis_blockhash)));
+    }
+
     SENSITIVE_POP(&iter);
     free(descriptor);
     free(multisig_data);
@@ -1126,7 +1140,7 @@ static bool parse_psbt_bytes(void* ctx)
     JADE_ASSERT(ctx);
     psbt_parse_data_t* data = (psbt_parse_data_t*)ctx;
     data->psbt_out = NULL;
-    const uint32_t flags = WALLY_PSBT_PARSE_FLAG_STRICT;
+    const uint32_t flags = WALLY_PSBT_PARSE_FLAG_STRICT | WALLY_PSBT_PARSE_FLAG_COMPLETE;
     const int wret = wally_psbt_from_bytes(data->bytes, data->bytes_len, flags, &data->psbt_out);
     return wret == WALLY_OK && data->psbt_out != NULL;
 }
@@ -1259,7 +1273,7 @@ void sign_psbt_process(void* process_ptr)
         const size_t chunk_len = remaining < PSBT_OUT_CHUNK_SIZE ? remaining : PSBT_OUT_CHUNK_SIZE;
         const size_t seqnum = imsg + 1;
         jade_process_reply_to_message_bytes_sequence(
-            process->ctx, seqnum, nmsgs, chunk, chunk_len, msgbuf, MAX_OUTPUT_MSG_SIZE);
+            &process->ctx, seqnum, nmsgs, chunk, chunk_len, msgbuf, MAX_OUTPUT_MSG_SIZE);
         chunk += chunk_len;
 
         if (seqnum < nmsgs) {

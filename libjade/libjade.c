@@ -13,12 +13,11 @@
 // The exposed API allows passing and fetching messages using the same
 // binary format that would be passed to a real device by serial/bluetooth.
 //
-#define _GNU_SOURCE 1 // FIXME: needed for strcasestr in qrmode.c
-#include <string.h>
-#undef _GNU_SOURCE
+#define _GNU_SOURCE 1 // needed for pthread extra funcs e.g. pthread_setname_np
 #include "sdkconfig.h"
 
 #include "libjade.h"
+#include "libjade_port.h"
 
 #include "icons.inc"
 
@@ -32,7 +31,8 @@
 #define HAVE_UNALIGNED_ACCESS 0
 
 #include <errno.h>
-#include <pthread.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/random.h>
 #include <sys/time.h> // Must be included before we redefine settimeofday()
@@ -51,7 +51,9 @@
 // https://github.com/richgel999/miniz with a couple of additional
 // patches for memory safety.
 #include "miniz.c"
-// Include the emulation of the o/s task functions
+// Include the emulation of the o/s task/event/camera functions
+#include "esp_camera.c"
+#include "esp_event.c"
 #include "task.c"
 // Include the esp32_deflate component
 #define ESP_PLATFORM 1
@@ -62,6 +64,13 @@
 #undef ESP_IDF_VERSION
 #undef ESP_PLATFORM
 #include "components/esp32_deflate/deflate.c"
+
+// Prevent "components/esp32-quirc/lib/identify.c" to include OpenMV's "fmath.h"
+// because we are redefining its functions below.
+#define __FMATH_H
+static inline int fast_roundf(float x) { return (int)(x); }
+static inline float fast_fabsf(float d) { return fabsf(d); }
+
 // qrCode encoding/decoding
 #include "components/esp32-quirc/lib/decode.c"
 #include "components/esp32-quirc/lib/identify.c"
@@ -81,24 +90,21 @@ static void __real_abort(void) { abort(); }
 static int settimeofday_no_op(const void* yv, const void* tz) { return 0; }
 #define settimeofday settimeofday_no_op
 
-#ifndef CONFIG_LIBJADE_NO_GUI
+#include "main/camera.h"
 #include "main/display.h"
 #include "main/gui.h"
 
 typedef void* locale_multilang_string_t;
 const locale_multilang_string_t* locale_get(const char* key) { return NULL; }
 const char* locale_lang_with_fallback(const locale_multilang_string_t* str, jlocale_t lang) { return NULL; }
-#endif // CONFIG_LIBJADE_NO_GUI
 
 // Include the core Jade firmware core, including wally/secp.
 #define AMALGAMATED_BUILD
 #include "main/amalgamated.c"
 #undef settimeofday
 
-#ifdef CONFIG_LIBJADE_NO_GUI
-// GUI: Include our fake GUI
-#include "gui.c"
-#endif // CONFIG_LIBJADE_NO_GUI
+// Include the NVS emulation code
+#include "nvs_flash.c"
 
 //
 // Stubs for code that does not apply to libjade or is not yet implemented
@@ -106,7 +112,7 @@ const char* locale_lang_with_fallback(const locale_multilang_string_t* str, jloc
 
 // main/idletimer.c
 void idletimer_init(void) {}
-bool idletimer_register_activity(const bool is_ui) { return true; }
+bool idletimer_register_activity(const bool is_ui) { return false; }
 void idletimer_set_min_timeout_secs(uint16_t min_timeout_secs) {};
 
 // main/logging.c
@@ -114,8 +120,18 @@ void idletimer_set_min_timeout_secs(uint16_t min_timeout_secs) {};
 esp_log_level_t _libjade_log_level = ESP_LOG_NONE;
 #endif
 
-// main/selfcheck.c
-bool debug_selfcheck(jade_process_t* process) { return true; }
+#ifndef SELFCHECK
+// Include the default selfcheck impl
+#include "main/selfcheck.c"
+#else
+// Include a user-defined selfcheck impl
+// clang-format off
+#define HSTR(x) #x
+#define XSTR(x) HSTR(x)
+#define SELFCHECK_FILE(dir, base) XSTR(dir/base.c)
+#include SELFCHECK_FILE(selfcheck, SELFCHECK)
+// clang-format on
+#endif
 
 esp_app_desc_t running_app_info = { "123456789012345678901" };
 esp_chip_info_t chip_info = { 0 };
@@ -137,74 +153,27 @@ esp_err_t esp_efuse_mac_get_default(uint8_t* out)
 
 void esp_deep_sleep_start(void) { abort(); }
 
-// UI
-#ifdef CONFIG_LIBJADE_NO_GUI
-uint8_t GUI_DEFAULT_FONT = 0;
-uint8_t GUI_TITLE_FONT = 1;
-
-// Display
-void display_init(TaskHandle_t* task) {}
-
-Icon* get_icon(const uint8_t* const start, const uint8_t* const end) { return NULL; }
-#endif
-
+// No physical buttons
 void input_init(void) {}
 
 // Serial
 bool serial_init(TaskHandle_t* task) { return true; }
-
-// Camera
-static const uint8_t* debug_image_data = NULL;
-void camera_set_debug_image(const uint8_t* data, const size_t len)
-{
-    JADE_ASSERT(!data == !len);
-    JADE_ASSERT(!len || len == CAMERA_IMAGE_WIDTH * CAMERA_IMAGE_HEIGHT);
-    debug_image_data = data;
-}
-
-void jade_camera_process_images(camera_process_fn_t fn, void* ctx, const bool show_ui, const char* text_label,
-    const bool show_click_button, const qr_guide_type_t qr_guide_type, const char* help_url,
-    progress_bar_t* progress_bar)
-{
-    if (debug_image_data) {
-        if (!fn(CAMERA_IMAGE_WIDTH, CAMERA_IMAGE_HEIGHT, debug_image_data, CAMERA_IMAGE_WIDTH * CAMERA_IMAGE_HEIGHT,
-                ctx)) {
-            JADE_LOGW("User callback returned false for fixed debug image - exiting camera regardless");
-        }
-    }
-}
 
 // main/ui/keyboard.c
 void make_keyboard_entry_activity(keyboard_entry_t* kb_entry, const char* title) {}
 
 void run_keyboard_entry_loop(keyboard_entry_t* kb_entry) {}
 
+#ifdef __APPLE__
+const uint8_t binary_pinserver_public_key_pub_start[33]
+#else
 const uint8_t _binary_pinserver_public_key_pub_start[33]
+#endif
     = { 0x03, 0x32, 0xb7, 0xb1, 0x34, 0x8b, 0xde, 0x8c, 0xa4, 0xb4, 0x6b, 0x9d, 0xcc, 0x30, 0x32, 0x0e, 0x14, 0x0c,
           0xa2, 0x64, 0x28, 0x16, 0x0a, 0x27, 0xbd, 0xbf, 0xc3, 0x0b, 0x34, 0xec, 0x87, 0xc5, 0x47 };
 
 // Events
-static volatile bool _libjade_stop_requested = false; // Used to stop the firmware
-
-#ifdef CONFIG_LIBJADE_NO_GUI
-void sync_wait_event_handler(void* handler_arg, esp_event_base_t base, int32_t id, void* event_data) {}
-
-esp_err_t sync_wait_event(wait_event_data_t* wait_event_data, esp_event_base_t* trigger_event_base,
-    int32_t* trigger_event_id, void** trigger_event_data, TickType_t max_wait)
-{
-    if (_libjade_stop_requested) {
-        // User requested the firmware to exit
-        pthread_exit(NULL);
-    }
-    return ESP_NO_EVENT;
-}
-
-esp_err_t sync_await_single_event(esp_event_base_t event_base, int32_t event_id, esp_event_base_t* trigger_event_base,
-    int32_t* trigger_event_id, void** trigger_event_data, TickType_t max_wait)
-{
-    return ESP_OK;
-}
-#endif // CONFIG_LIBJADE_NO_GUI
+volatile bool _libjade_stop_requested = false; // Used to stop the firmware
 
 // HW: Task API
 bool run_on_temporary_stack(size_t stack_size, temporary_stack_function_t fn, void* ctx) { return fn(ctx); }
@@ -235,7 +204,7 @@ void get_random(void* bytes_out, size_t len)
     int getrandom_enosys = 0;
 
     while (remaining > 0) {
-        const ssize_t bytes_read = getrandom(current_ptr, remaining, 0);
+        const ssize_t bytes_read = libjade_getrandom(current_ptr, remaining);
 
         if (bytes_read == -1) {
             if (errno == EINTR) {
@@ -289,162 +258,18 @@ int random_mbedtls_cb(void* ctx, uint8_t* buf, const size_t len)
     return 0;
 }
 
-// HW: NVS storage
-static struct wally_map nvs_storage[5]; // Map of field name to contents
-
-esp_err_t nvs_flash_init(void) { return ESP_OK; }
-
-static struct wally_map* get_nvs_ns(const char* ns)
-{
-    if (!strcmp(ns, DEFAULT_NAMESPACE)) {
-        return &nvs_storage[0];
-    }
-    if (!strcmp(ns, MULTISIG_NAMESPACE)) {
-        return &nvs_storage[1];
-    }
-    if (!strcmp(ns, DESCRIPTOR_NAMESPACE)) {
-        return &nvs_storage[2];
-    }
-    if (!strcmp(ns, OTP_NAMESPACE)) {
-        return &nvs_storage[3];
-    }
-    if (!strcmp(ns, HOTP_COUNTERS_NAMESPACE)) {
-        return &nvs_storage[4];
-    }
-    return NULL;
-}
-
-esp_err_t nvs_open(const char* ns, nvs_open_mode_t open_mode, nvs_handle_t* out_handle)
-{
-    *out_handle = get_nvs_ns(ns);
-    return *out_handle ? ESP_OK : ESP_ERR_NVS_NOT_FOUND;
-}
-
-esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* value, size_t length)
-{
-    int ret = wally_map_replace(handle, (const unsigned char*)key, strlen(key), value, length);
-    return ret == WALLY_OK ? ESP_OK : ESP_FAIL;
-}
-
-esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out_value, size_t* length)
-{
-    const struct wally_map_item* item = wally_map_get(handle, (const unsigned char*)key, strlen(key));
-    if (!item || item->value_len > *length) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    memcpy(out_value, item->value, item->value_len);
-    *length = item->value_len;
-    return ESP_OK;
-}
-
-esp_err_t nvs_set_str(nvs_handle_t handle, const char* key, const char* value)
-{
-    return nvs_set_blob(handle, key, value, strlen(value) + 1); // Include NUL terminator
-}
-
-esp_err_t nvs_get_str(nvs_handle_t handle, const char* key, char* out_value, size_t* length)
-{
-    return nvs_get_blob(handle, key, out_value, length);
-}
-
-esp_err_t nvs_set_u32(nvs_handle_t handle, const char* key, uint32_t value)
-{
-    // FIXME: endianess, if we will allow loading/saving flash
-    return nvs_set_blob(handle, key, (void*)&value, sizeof(value));
-}
-
-esp_err_t nvs_get_u32(nvs_handle_t handle, const char* key, uint32_t* out_value)
-{
-    // FIXME: endianess, if we will allow loading/saving flash
-    size_t length = sizeof(out_value);
-    return nvs_get_blob(handle, key, (void*)out_value, &length);
-}
-
-esp_err_t nvs_erase_key(nvs_handle_t handle, const char* key)
-{
-    if (wally_map_remove(handle, (const unsigned char*)key, strlen(key)) != WALLY_OK) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    return ESP_OK;
-}
-
-esp_err_t nvs_entry_find(const char* part_name, const char* ns, nvs_type_t type, nvs_iterator_t* output_iterator)
-{
-    *output_iterator = malloc(sizeof(**output_iterator));
-    if (!*output_iterator) {
-        return ESP_FAIL;
-    }
-    if (!((*output_iterator)->m = get_nvs_ns(ns)) || !(*output_iterator)->m->num_items) {
-        goto fail;
-    }
-    // FIXME: Ignores type, pretty sure we only store the same type in each map?
-    (*output_iterator)->idx = 0;
-    return ESP_OK;
-fail:
-    free(*output_iterator);
-    *output_iterator = NULL;
-    return ESP_ERR_NVS_NOT_FOUND;
-}
-
-esp_err_t nvs_entry_next(nvs_iterator_t* iterator)
-{
-    if ((*iterator)->idx >= (*iterator)->m->num_items) {
-        nvs_release_iterator(*iterator);
-        *iterator = NULL;
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    ++(*iterator)->idx;
-    return ESP_OK;
-}
-
-esp_err_t nvs_entry_info(const nvs_iterator_t iterator, nvs_entry_info_t* out_info)
-{
-    // FIXME: Only sets key, as thats all we ever read
-    if (!iterator || iterator->idx >= iterator->m->num_items) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    const struct wally_map_item* item = iterator->m->items + iterator->idx;
-    if (item->key_len >= NVS_KEY_NAME_MAX_SIZE) {
-        abort();
-    }
-    memcpy(out_info->key, item->key, item->key_len);
-    out_info->key[item->key_len] = '\0';
-    return ESP_OK;
-}
-
-void nvs_release_iterator(nvs_iterator_t iterator)
-{
-    if (iterator) {
-        free(iterator);
-    }
-}
-
-esp_err_t nvs_flash_erase(void)
-{
-    for (size_t i = 0; i < sizeof(nvs_storage) / sizeof(nvs_storage[0]); ++i) {
-        wally_map_clear(&nvs_storage[i]);
-    }
-    return ESP_OK;
-}
-
-esp_err_t nvs_get_stats(const char* part_name, nvs_stats_t* nvs_stats)
-{
-    nvs_stats->used_entries = 0;
-    for (size_t i = 0; i < sizeof(nvs_storage) / sizeof(nvs_storage[0]); ++i) {
-        nvs_stats->used_entries += nvs_storage[i].num_items;
-    }
-    nvs_stats->free_entries = ESP_NVS_TOTAL_ENTRIES - nvs_stats->used_entries;
-    return ESP_OK;
-}
-
 static void* jade_fw_thread_fn(void* arg)
 {
+    libjade_thread_setname("libjade_fw");
     start_dashboard();
     return NULL; // Never reached
 }
 
 // External API:
-static pthread_t _libjade_thread_id; // Thread ID of the FW thread
+static pthread_t _libjade_thread_id = 0; // Thread ID of the FW thread
+
+// set in libjade_send() to decide which ringbuffer to use
+static __thread bool _libjade_is_internal_msg = false;
 
 void libjade_start(void)
 {
@@ -458,51 +283,93 @@ void libjade_start(void)
 
 void libjade_stop(void)
 {
+    // stop camera task (if running)
+    camera_stop();
     // Request the firmware to stop
+    // the main firmware thread branches down various code paths depending on what activity the user
+    // is doing, and in some of those code paths it may be waiting for an event with no timeout.
     _libjade_stop_requested = true;
+    _trigger_last_wait_handle();
     pthread_join(_libjade_thread_id, NULL);
+    _libjade_thread_id = 0;
     _libjade_stop_requested = false;
+    // stop the gui task
+    gui_stop();
+    // clean up remaining resources
+    esp_event_loop_delete_default();
     vRingbufferDelete(shared_in);
     shared_in = NULL;
     vRingbufferDelete(serial_out);
     serial_out = NULL;
     vRingbufferDelete(internal_out);
     internal_out = NULL;
+    vRingbufferDelete(libjade_out);
+    libjade_out = NULL;
+    _libjade_is_internal_msg = false;
+    // clear keychain
+    keychain_clear();
 }
 
 static uint8_t _libjade_serial_data_in[MAX_INPUT_MSG_SIZE + 1] = { 0 };
-static uint8_t _libjade_serial_data_out[MAX_OUTPUT_MSG_SIZE] = { 0 };
 static size_t _libjade_serial_read_ptr = 0;
 static TickType_t _libjade_last_processing_time = 0;
 
-bool libjade_send(const uint8_t* data, const size_t size)
+// Mutex to serialize calls to libjade_send() / handle_data()
+static pthread_mutex_t _libjade_send_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+bool libjade_send(const uint8_t* data, size_t len)
 {
-    if (_libjade_serial_read_ptr + size >= MAX_INPUT_MSG_SIZE) {
-        return false;
+    pthread_mutex_lock(&_libjade_send_mutex);
+
+    // Determine if this message is an internal libjade request, and if so
+    // route it to the libjade handler instead of the standard serial buffer.
+    // NOTE: This assumes that libjade internal messages are always fully sent in a
+    //       single write. If an internal message is sent in parts, later parts will
+    //       go through serial handling and be rejected.
+    const bool is_libjade_req = len > strlen(LIBJADE_REQUEST_METHOD)
+        && memmem(data, len, LIBJADE_REQUEST_METHOD, strlen(LIBJADE_REQUEST_METHOD)) != NULL;
+    _libjade_serial_data_in[0] = is_libjade_req ? SOURCE_LIBJADE : SOURCE_SERIAL;
+
+    while (len) {
+        const size_t remaining_bytes = MAX_INPUT_MSG_SIZE - _libjade_serial_read_ptr;
+        const size_t copy_len = len > remaining_bytes ? remaining_bytes : len;
+        JADE_ASSERT(_libjade_serial_read_ptr + copy_len <= MAX_INPUT_MSG_SIZE);
+        memcpy(_libjade_serial_data_in + 1 + _libjade_serial_read_ptr, data, copy_len);
+        handle_data(_libjade_serial_data_in, &_libjade_serial_read_ptr, copy_len, &_libjade_last_processing_time);
+        data += copy_len;
+        len -= copy_len;
     }
-    // Pass the message through as though it came from the serial interface
-    uint8_t* data_with_source = _libjade_serial_data_in;
-    data_with_source[0] = SOURCE_SERIAL;
-    memcpy(data_with_source + 1 + _libjade_serial_read_ptr, data, size);
-    const bool force_reject_if_no_msg = false;
-    handle_data(data_with_source, &_libjade_serial_read_ptr, size, &_libjade_last_processing_time,
-        force_reject_if_no_msg, _libjade_serial_data_out);
+
+    if (is_libjade_req) {
+        _libjade_is_internal_msg = true;
+    }
+
+    pthread_mutex_unlock(&_libjade_send_mutex);
     return true;
 }
 
-uint8_t* libjade_receive(const unsigned int timeout, size_t* size_out)
+uint8_t* libjade_receive(const unsigned int timeout, size_t* len_out)
 {
-    // timeout is in seconds, convert to milliseconds
+    const bool is_internal_msg = _libjade_is_internal_msg;
+    RingbufHandle_t ringbuf = is_internal_msg ? libjade_out : serial_out;
+
     const unsigned int ms = timeout * 1000;
-    void* item = xRingbufferReceive(serial_out, size_out, ms / portTICK_PERIOD_MS);
+    void* item = xRingbufferReceive(ringbuf, len_out, ms / portTICK_PERIOD_MS);
     if (!item) {
-        // No message available
-        *size_out = 0;
+        *len_out = 0; // No message available
+    }
+    if (is_internal_msg) {
+        _libjade_is_internal_msg = item != NULL; // Mark internal msgs for libjade_release
     }
     return item;
 }
 
-void libjade_release(uint8_t* data) { vRingbufferReturnItem(serial_out, (void*)data); }
+void libjade_release(uint8_t* data)
+{
+    RingbufHandle_t ringbuf = _libjade_is_internal_msg ? libjade_out : serial_out;
+    vRingbufferReturnItem(ringbuf, (void*)data);
+    _libjade_is_internal_msg = false; // Reset until next message
+}
 
 void libjade_set_log_level(int level)
 {
@@ -516,4 +383,88 @@ void libjade_set_log_level(int level)
         _libjade_log_level = (esp_log_level_t)level;
     }
 #endif
+}
+
+static void build_display_size_reply(const void* ctx, CborEncoder* container)
+{
+    JADE_ASSERT(ctx && container);
+    CborEncoder map_encoder;
+    JADE_ASSERT(cbor_encoder_create_map(container, &map_encoder, 2) == CborNoError);
+    add_uint_to_map(&map_encoder, "width", CONFIG_DISPLAY_WIDTH);
+    add_uint_to_map(&map_encoder, "height", CONFIG_DISPLAY_HEIGHT);
+    JADE_ASSERT(cbor_encoder_close_container(container, &map_encoder) == CborNoError);
+}
+
+// libjade RPC handlers
+#define CONST_STRNCMP(str, str_len, cmp_to) str_len == sizeof(cmp_to) - 1 && !strncmp(str, cmp_to, str_len)
+#define IS_JADE_REQUEST(name) CONST_STRNCMP(request, request_len, name)
+
+void process_libjade_request(const cbor_msg_t* const ctx)
+{
+    uint8_t buf[JADE_MSG_REPLY_LEN];
+
+    CborValue params;
+    if (!rpc_get_map("params", &ctx->value, &params)) {
+        goto cleanup;
+    }
+
+    const char* request;
+    size_t request_len = 0;
+    rpc_get_string_ptr("request", &params, &request, &request_len);
+    JADE_ASSERT(request_len != 0);
+
+    if (IS_JADE_REQUEST("send_input")) {
+        const char* event;
+        size_t event_len = 0;
+        rpc_get_string_ptr("event", &params, &event, &event_len);
+        if (CONST_STRNCMP(event, event_len, "left")) {
+            jade_process_reply_to_message_ok_ex(ctx);
+            gui_prev();
+        } else if (CONST_STRNCMP(event, event_len, "right")) {
+            jade_process_reply_to_message_ok_ex(ctx);
+            gui_next();
+        } else if (CONST_STRNCMP(event, event_len, "click")) {
+            jade_process_reply_to_message_ok_ex(ctx);
+            gui_front_click();
+        } else {
+            goto cleanup;
+        }
+        return;
+    } else if (IS_JADE_REQUEST("get_display_bytes")) {
+        const uint8_t* output = (uint8_t*)display_hw_get_buffer();
+        const size_t output_len = CONFIG_DISPLAY_WIDTH * CONFIG_DISPLAY_HEIGHT * sizeof(color_t);
+        jade_process_reply_to_message_bytes(ctx, output, output_len);
+        return;
+    } else if (IS_JADE_REQUEST("get_display_size")) {
+        jade_process_reply_to_message_result(ctx, buf, sizeof(buf), &ctx->source, build_display_size_reply);
+        return;
+    } else if (IS_JADE_REQUEST("set_camera_bytes")) {
+        const uint8_t* bytes = NULL;
+        size_t bytes_len = 0;
+        rpc_get_bytes_ptr("bytes", &params, &bytes, &bytes_len);
+        if (libjade_push_camera_frame(bytes, bytes_len)) {
+            jade_process_reply_to_message_ok_ex(ctx);
+            return;
+        }
+    } else if (IS_JADE_REQUEST("get_nvs")) {
+        uint8_t* output;
+        size_t output_len;
+        if (libjade_save_nvs(&output, &output_len) == ESP_OK) {
+            jade_process_reply_to_message_bytes(ctx, output, output_len);
+            JADE_WALLY_VERIFY(wally_bzero(output, output_len));
+            free(output);
+            return;
+        }
+    } else if (IS_JADE_REQUEST("set_nvs")) {
+        const uint8_t* bytes = NULL;
+        size_t bytes_len = 0;
+        rpc_get_bytes_ptr("bytes", &params, &bytes, &bytes_len);
+        if (bytes_len && libjade_load_nvs(bytes, bytes_len) == ESP_OK) {
+            jade_process_reply_to_message_ok_ex(ctx);
+            return;
+        }
+    }
+
+cleanup:
+    jade_process_reject_message_ex(ctx, CBOR_RPC_BAD_PARAMETERS, "Unhandled error", NULL, 0, buf, sizeof(buf));
 }

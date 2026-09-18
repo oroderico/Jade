@@ -4,7 +4,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.39] - 2026-13-06
+## [1.0.41] - 2026-08-22
+
+Note: This release contains important security updates; All users should
+upgrade as soon as possible. The developers would like to thank:
+
+- Jordan Mecom from Spiral for developing Loupe and reporting issues to us
+  for this and previous releases. You can read more about the Loupe project
+  here: https://spiralbtc.substack.com/p/meet-loupe-ai-powered-vulnerability.
+- 0xaudron (@0xaudron)for developing Kvazar (@kvazar_ai), an agentic security
+  harness, and reporting issues to us for this release.
+- Damir, odudex, ZatoshiX, @erickcestari, @popodai and Bitcoin Red Team for
+  help investigating and fixing several important issues for this release.
+
+Added:
+- Improve stack protection for production devices.
+- Add support for registering and signing with Liquid descriptors (development devices only).
+- Add support for custom genesis blockhashes when signing Liquid transactions.
+- Add support for running libjade with GUI/input/nvs/camera support.
+- Add a libjade GUI example runnable as a desktop application.
+- Add additional per-device entropy to the initial random seed.
+- Increment secure version to prevent firmware downgrades from this release.
+
+Changed:
+- Update IDF framework to version 5.5.4.
+- Update Python dependencies to the latest known-good versions.
+- Update libwally and libsecp256k1-zkp to their latest releases.
+- Create new docker build images to ensure consistent builds.
+- Rename displayed L-BTC asset issuer from 'peg-in' to 'federation' for clarity.
+- Update message handling to use less memory and be more robust with slow or flaky connections.
+- Optimizations for qr mode processing and smoother display updates.
+- Optimizations to reduce firmware size, stack and memory usage.
+- Bump jadepy to release 1.0.41.
+
+Fixed:
+- Fix device reboot when restarting while connected to an overly-chatty host.
+- Fix jade_ota.py in "download-only" mode.
+- Fix device hang instead of reboot in certain circumstances.
+- Fix `sign_tx` call in `jade_cli.py`.
+- Various documentation fixes.
+- Work around ABI differences in cbor2 versions to make installation/packaging easier.
+- Improved defense-in-depth internal memory scrubbing of sensitive data.
+- Fix DIY M5StickC Plus 2 PIN navigation.
+- GUI spelling fixes.
+- QEMU fixes and helper script updates.
+- Many build and test infrastructure cleanups and fixes.
+- Various internal improvements for validation, error handling and thread safety.
+- Various minor bug fixes resulting from build/test infrastructure improvements.
+- Clean up large GUI activities sooner to prevent memory fragmentation.
+
+## [1.0.40] - 2026-04-30
+
+### Added
+- Support importing exported Google Authenticator OTP records.
+- Support showing OTP secrets as text or a QR.
+- Support showing BIP85/BIP39 qr codes.
+- Support DIY device ESP32-S3-DevKitC-1.
+
+### Changed
+- Allow entering indices/numbers directly without requiring leading zeros.
+- Improve unlock screen display text for clarity.
+- Minor firmware size and display performance optimizations.
+- Update jade_builder docker image.
+
+### Fixed
+- Fix a crash when verifying a BIP85 mnemonic.
+- Reject mnemonic import for invalid and non-12/24 word mnemonics.
+- Reject OTP registration for unsupported periods.
+- Clear secrets from memory more diligently after UI display.
+- Always confirm all outputs when Green recovery signing.
+- Upgrade cbor2 to 5.9.0 to fix upstream parsing issues.
+- Upgrade libwally to release 1.5.3.
+- Various libjade fixes and improvements.
+
+
+## [1.0.39] - 2026-03-06
 
 ### Added
 - Support for signing Green 2of3 recovery transactions as the recovery signer.

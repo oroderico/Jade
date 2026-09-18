@@ -21,9 +21,9 @@
 
 #ifdef CONFIG_JADE_USE_USB_JTAG_SERIAL
 
-#if !defined(CONFIG_NEWLIB_STDIN_LINE_ENDING_LF) || !defined(CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF)
+#if !defined(CONFIG_LIBC_STDIN_LINE_ENDING_LF) || !defined(CONFIG_LIBC_STDOUT_LINE_ENDING_LF)
 #error                                                                                                                 \
-    "Both CONFIG_NEWLIB_STDIN_LINE_ENDING_LF and CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF must be set for CONFIG_JADE_USE_USB_JTAG_SERIAL mode"
+    "Both CONFIG_LIBC_STDIN_LINE_ENDING_LF and CONFIG_LIBC_STDOUT_LINE_ENDING_LF must be set for CONFIG_JADE_USE_USB_JTAG_SERIAL mode"
 #endif
 
 #if !defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
@@ -39,7 +39,6 @@
 #endif // IDF_TARGET_ESP32S3
 
 static uint8_t* full_serial_data_in = NULL;
-static uint8_t* serial_data_out = NULL;
 
 static TaskHandle_t serial_reader_handle = NULL;
 static TaskHandle_t* p_serial_writer_handle = NULL;
@@ -126,9 +125,8 @@ static void serial_reader(void* ignore)
         }
 #endif // CONFIG_IDF_TARGET_ESP32S3
 
-        JADE_LOGD("Passing %u+%u bytes from serial device to common handler", read, len);
-        const bool force_reject_if_no_msg = false;
-        handle_data(full_serial_data_in, &read, len, &last_processing_time, force_reject_if_no_msg, serial_data_out);
+        // Pass data through to the common handler
+        handle_data(full_serial_data_in, &read, len, &last_processing_time);
     }
     serial_post_exit_event_and_await_death(&serial_reader_shutdown_done);
 }
@@ -241,6 +239,12 @@ static bool serial_init_internal(void)
         return false;
     }
 
+    // default esp32 pins for UART0
+    err = uart_set_pin(UART_NUM_0, 1, 3, -1, -1);
+    if (err != ESP_OK) {
+        return false;
+    }
+
     /* maximum OTA CHUNK + cbor overhead for RX */
     err = uart_driver_install(UART_NUM_0, (1024 * 4) + 46, 1024, 0, NULL, UART_INTR_ALLOC_FLAGS);
     if (err != ESP_OK) {
@@ -269,7 +273,6 @@ bool serial_init(TaskHandle_t* serial_handle)
 {
     JADE_ASSERT(serial_handle);
     JADE_ASSERT(!full_serial_data_in);
-    JADE_ASSERT(!serial_data_out);
     JADE_ASSERT(!serial_is_enabled);
     JADE_ASSERT(!serial_reader_shutdown_done);
     JADE_ASSERT(!serial_writer_shutdown_done);
@@ -281,7 +284,6 @@ bool serial_init(TaskHandle_t* serial_handle)
     // Extra byte at the start for source-id
     full_serial_data_in = JADE_MALLOC_PREFER_SPIRAM(MAX_INPUT_MSG_SIZE + 1);
     full_serial_data_in[0] = SOURCE_SERIAL;
-    serial_data_out = JADE_MALLOC_PREFER_SPIRAM(MAX_OUTPUT_MSG_SIZE);
     p_serial_writer_handle = serial_handle;
     return serial_init_internal();
 }

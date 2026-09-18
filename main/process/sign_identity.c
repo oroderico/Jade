@@ -1,10 +1,13 @@
 #ifndef AMALGAMATED_BUILD
+#include <ctype.h>
+
 #include "../jade_assert.h"
 #include "../jade_wally_verify.h"
 #include "../keychain.h"
 #include "../process.h"
 #include "../ui.h"
 #include "../utils/cbor_rpc.h"
+#include "../utils/util.h"
 
 #include "../button_events.h"
 
@@ -57,6 +60,12 @@ void sign_identity_process(void* process_ptr)
         goto cleanup;
     }
 
+    // Identity must be a string of printable characters
+    if (!string_n_all(identity, identity_len, isprint)) {
+        jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, "Invalid identity string");
+        goto cleanup;
+    }
+
     const uint8_t* challenge = NULL;
     size_t challenge_len = 0;
     rpc_get_bytes_ptr("challenge", &params, &challenge, &challenge_len);
@@ -72,8 +81,7 @@ void sign_identity_process(void* process_ptr)
         JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
         jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Feature requires resetting Jade");
 
-        const char* message[] = { "Feature requires Jade reset" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade reset");
         goto cleanup;
     }
 
@@ -97,7 +105,7 @@ void sign_identity_process(void* process_ptr)
 
     // Return pubkey and signature
     uint8_t buf[256];
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &output, reply_signature_and_pubkey);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), &output, reply_signature_and_pubkey);
 
     JADE_LOGI("Success");
 

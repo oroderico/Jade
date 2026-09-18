@@ -127,8 +127,8 @@ void register_otp_process(void* process_ptr)
     if (keychain_get()->seed_len == 0) {
         JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
         jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Feature requires resetting Jade");
-        const char* message[] = { "Feature requires Jade reset" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade reset");
+        goto cleanup;
     }
 
     // Validate and persist the new otp uri
@@ -138,8 +138,7 @@ void register_otp_process(void* process_ptr)
         // Display any internal error that may occur after the user has viewed
         // and confirmed the OTP record (earlier errors are just messaged)
         if (errcode == CBOR_RPC_INTERNAL_ERROR) {
-            const char* message[] = { errmsg };
-            await_error_activity(message, 1);
+            await_error(errmsg);
         }
         jade_process_reject_message(process, errcode, errmsg);
         goto cleanup;
@@ -197,8 +196,7 @@ static bool get_otp_data_from_kb(
             }
         } else if (!validate_otp_name(kb_entry.strdata, &errmsg)) {
             // Invalid otp name
-            const char* message[] = { errmsg };
-            await_error_activity(message, 1);
+            await_error(errmsg);
         } else {
             const char* question[] = { kb_entry.strdata };
             done = await_yesno_activity("Confirm OTP Name", question, 1, true, "blkstrm.com/otp");
@@ -271,8 +269,7 @@ bool register_otp_kb_entry(void)
     // Check keychain has seed data
     if (keychain_get()->seed_len == 0) {
         JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
-        const char* message[] = { "Feature requires Jade reset" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade reset");
     }
 
     bool ret = false;
@@ -294,8 +291,7 @@ bool register_otp_kb_entry(void)
     const int errcode = handle_new_otp_uri(otp_name, otp_uri, uri_written, &errmsg);
     if (errcode && errcode != CBOR_RPC_USER_CANCELLED) {
         // Display any error (ignoring explicit user cancel)
-        const char* message[] = { errmsg };
-        await_error_activity(message, 1);
+        await_error(errmsg);
         goto cleanup;
     }
 
@@ -359,10 +355,9 @@ int register_otp_string(const char* otp_uri, const size_t uri_len, const char** 
 
     // Check keychain has seed data
     if (keychain_get()->seed_len == 0) {
-        JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
+        JADE_LOGE("No wallet seed available"); // Wallet must be re-initialised from mnemonic
         *errmsg = "No wallet seed available";
-        const char* message[] = { "Feature requires Jade wallet" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade wallet");
         return CBOR_RPC_INTERNAL_ERROR;
     }
 
@@ -370,13 +365,17 @@ int register_otp_string(const char* otp_uri, const size_t uri_len, const char** 
     char otp_name[OTP_MAX_NAME_LEN] = { 0 };
     if (otp_ctx.issuer_len) {
         // If have issuer, prefill otp_name with urldecoded version (truncates to fit if too long)
-        urldecode(otp_ctx.issuer, otp_ctx.issuer_len, otp_name, sizeof(otp_name));
+        if (!urldecode(otp_ctx.issuer, otp_ctx.issuer_len, otp_name, sizeof(otp_name))) {
+            JADE_LOGE("Failed to decode otp issuer");
+            *errmsg = "Failed to decode otp issuer";
+            return CBOR_RPC_BAD_PARAMETERS;
+        }
         // Ensure prefilled name is valid to use as storage key (eg. strip out any invalid chars)
         storage_key_name_make_valid(otp_name);
     }
     if (!get_otp_data_from_kb(otp_name, sizeof(otp_name), NULL, 0, NULL)) {
         // User abandoned
-        JADE_LOGW("User abandoned (entering otp name)");
+        JADE_LOGW("User abandoned entering otp name");
         *errmsg = "User abandoned entering otp name";
         return CBOR_RPC_USER_CANCELLED;
     }
@@ -429,8 +428,7 @@ bool register_otp_qr(void)
     // Check keychain has seed data
     if (keychain_get()->seed_len == 0) {
         JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
-        const char* message[] = { "Feature requires Jade reset" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade reset");
         return false;
     }
 
@@ -455,8 +453,7 @@ bool register_otp_qr(void)
         if (errcode && errcode != CBOR_RPC_USER_CANCELLED) {
             JADE_LOGE("Processing OTP URI failed: %s", errmsg);
             // Display any error (ignoring explicit user cancel)
-            const char* message[] = { errmsg };
-            await_error_activity(message, 1);
+            await_error(errmsg);
             goto cleanup;
         }
     }
@@ -470,8 +467,7 @@ bool register_otp_qr(void)
         if (errcode && errcode != CBOR_RPC_USER_CANCELLED) {
             JADE_LOGE("Processing OTP MIGRATE URI failed: %s", errmsg);
             // Display any error (ignoring explicit user cancel)
-            const char* message[] = { errmsg };
-            await_error_activity(message, 1);
+            await_error(errmsg);
             goto cleanup;
         }
     }

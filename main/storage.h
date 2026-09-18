@@ -7,11 +7,13 @@
 
 #include <nvs.h>
 
+#include "jade_assert.h"
 #include "utils/network.h"
 
 #define BLE_ENABLED 0x1
 
 #define GUI_FLAGS_THEMES_MASK 0x7
+#define GUI_FLAGS_CAMERA_ROTATED 0x20
 #define GUI_FLAGS_FLIP_ORIENTATION 0x40
 #define GUI_FLAGS_USE_WHEEL_CLICK 0x80
 

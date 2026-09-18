@@ -140,7 +140,7 @@ static void rpc_get_asset_summary(
 
         if (!cbor_value_is_map(&arrayItem)
             || !rpc_get_n_bytes("asset_id", &arrayItem, sizeof(item->asset_id), item->asset_id)
-            || !rpc_get_uint64_t("satoshi", &arrayItem, &item->value)) {
+            || !rpc_get_uint64("satoshi", &arrayItem, &item->value)) {
             return;
         }
 
@@ -195,7 +195,7 @@ static bool validate_additional_info(const struct wally_tx* tx, const TxType_t t
     return true;
 }
 
-TxType_t params_additional_info(jade_process_t* process, CborValue* params, const struct wally_tx* tx, TxType_t* txtype,
+bool params_additional_info(jade_process_t* process, CborValue* params, const struct wally_tx* tx, TxType_t* txtype,
     bool* is_partial, asset_summary_t** in_sums, size_t* num_in_sums, asset_summary_t** out_sums, size_t* num_out_sums,
     const char** errmsg)
 {
@@ -222,8 +222,8 @@ TxType_t params_additional_info(jade_process_t* process, CborValue* params, cons
     rpc_get_asset_summary(process, "wallet_input_summary", &additional_info, in_sums, num_in_sums);
     rpc_get_asset_summary(process, "wallet_output_summary", &additional_info, out_sums, num_out_sums);
 
-    // 'partial' flag (defaults to false, set above)
-    rpc_get_boolean("is_partial", &additional_info, is_partial);
+    // 'partial' flag (defaults to false, initially also defaulted above)
+    *is_partial = rpc_get_bool_or("is_partial", &additional_info, false);
 
     // Tx Type
     if (!rpc_get_txtype(process, &additional_info, txtype)) {
@@ -353,7 +353,7 @@ bool params_commitment_data(
 
     if (!(ec.c.content & (COMMITMENTS_VBF | COMMITMENTS_VALUE_BLIND_PROOF))
         || !rpc_get_n_bytes("asset_id", item, sizeof(ec.c.asset_id), ec.c.asset_id)
-        || !rpc_get_uint64_t("value", item, &ec.c.value)) {
+        || !rpc_get_uint64("value", item, &ec.c.value)) {
         *errmsg = "Invalid or missing trusted commitment data";
         return false;
     }
@@ -516,8 +516,11 @@ bool params_trusted_commitments(
         }
 
         // Populate commitments data for the tx output if present
-        params_commitment_data(&arrayItem, &commitments[i], &tx->outputs[i], &errmsg);
-        if (errmsg) {
+        if (params_commitment_data(&arrayItem, &commitments[i], &tx->outputs[i], &errmsg)) {
+            // Valid output commitments
+            JADE_ASSERT(!errmsg);
+        } else if (errmsg) {
+            // Invalid input commitments (rather than simply not present)
             goto cleanup;
         }
 
@@ -577,7 +580,7 @@ bool update_elements_outputs(
             outinfo->flags |= OUTPUT_FLAG_CONFIDENTIAL;
 
             // NOTE: This is not valid if this output has been validated as belonging to this wallet
-            if (outinfo->flags & OUTPUT_FLAG_VALIDATED) {
+            if (outinfo->flags & OUTPUT_FLAG_IS_OURS) {
                 *errmsg = "Missing blinding information for wallet output";
                 return false;
             }
@@ -625,16 +628,21 @@ bool validate_elements_outputs(const network_t network_id, const struct wally_tx
 
         // If the output has been verified as belonging to this wallet, we can
         // use it to validate some part of any passed input- or output- summary.
-        if (outinfo->flags & OUTPUT_FLAG_VALIDATED) {
+        if (outinfo->flags & OUTPUT_FLAG_IS_OURS) {
             JADE_ASSERT(outinfo->flags & OUTPUT_FLAG_HAS_UNBLINDED);
 
+            bool is_valid;
             if (outinfo->flags & OUTPUT_FLAG_CHANGE) {
                 // NOTE: change outputs are subtracted from the relevant 'input summary'.
-                asset_summary_update(
-                    in_sums, num_in_sums, outinfo->asset_id, sizeof(outinfo->asset_id), (0 - outinfo->value));
+                is_valid = asset_summary_update(
+                    in_sums, num_in_sums, outinfo->asset_id, sizeof(outinfo->asset_id), 0 - outinfo->value);
             } else {
-                asset_summary_update(
+                is_valid = asset_summary_update(
                     out_sums, num_out_sums, outinfo->asset_id, sizeof(outinfo->asset_id), outinfo->value);
+            }
+            if (!is_valid) {
+                *errmsg = "Failed to validate input/output summary information";
+                return false;
             }
         }
     }
@@ -654,6 +662,50 @@ bool sighash_is_supported(const TxType_t txtype, const uint32_t sig_type, const 
     }
     // All other cases must be ALL at present
     return sighash == WALLY_SIGHASH_ALL;
+}
+
+void params_genesis_hash(network_t network_id, const bool for_liquid, const uint8_t* genesis, const size_t genesis_len,
+    uint8_t* genesis_out, const size_t genesis_out_len, const char** errmsg)
+{
+    JADE_ASSERT(genesis_out && genesis_out_len == SHA256_LEN);
+    JADE_INIT_OUT_PPTR(errmsg);
+
+    if (!for_liquid) {
+        // Bitcoin
+        if (genesis) {
+            *errmsg = "genesis_hash only appropriate for liquid networks";
+        }
+        return;
+    }
+    // Liquid
+    if (!genesis) {
+        // Use the consensus genesis blockhash for the network
+        network_to_genesis_hash(network_id, genesis_out, genesis_out_len);
+        return;
+    }
+    // Caller has provided a genesis blockhash to use
+    if (genesis_len != SHA256_LEN) {
+        *errmsg = "Invalid genesis_hash";
+        return;
+    }
+    uint8_t mainnet_genesis[SHA256_LEN];
+    network_to_genesis_hash(NETWORK_LIQUID, mainnet_genesis, sizeof(mainnet_genesis));
+    const bool is_mainnet_genesis = !memcmp(genesis, mainnet_genesis, genesis_len);
+    if (network_id == NETWORK_LIQUID_TESTNET || network_id == NETWORK_LIQUID_REGTEST) {
+        if (is_mainnet_genesis) {
+            // Caller attempting to use the mainnet genesis hash on a test network
+            *errmsg = "Network/pset genesis mismatch";
+            return;
+        }
+    } else if (!is_mainnet_genesis) {
+        // Caller attempting to use a non-mainnet genesis hash on mainnet
+        *errmsg = "Network/pset genesis mismatch";
+        return;
+    }
+    if (genesis_out != genesis) {
+        // Caller provided a new buffer for the result; copy it there
+        memcpy(genesis_out, genesis, genesis_len);
+    }
 }
 
 bool show_btc_fee_confirmation_activity(const network_t network_id, const struct wally_tx* tx,

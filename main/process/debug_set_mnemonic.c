@@ -36,7 +36,6 @@ void debug_set_mnemonic_process(void* process_ptr)
     char passphrase[PASSPHRASE_MAX_LEN + 1];
     SENSITIVE_PUSH(passphrase, sizeof(passphrase));
     const char* p_passphrase = NULL;
-    bool temporary_wallet = false;
     const uint8_t* seed = NULL;
     size_t written = 0;
 
@@ -44,7 +43,7 @@ void debug_set_mnemonic_process(void* process_ptr)
     SENSITIVE_PUSH(&keydata, sizeof(keydata));
 
     // Get field which can be set to test 'temporary restore' wallet
-    rpc_get_boolean("temporary_wallet", &params, &temporary_wallet);
+    bool temporary_wallet = rpc_get_bool_or("temporary_wallet", &params, false);
 
     // Slightly hacky, can accept a seed or a mnemonic
     if (rpc_has_field_data("seed", &params)) {
@@ -103,8 +102,7 @@ void debug_set_mnemonic_process(void* process_ptr)
 
     // Pop up a notification that the wallet has been injected
     // (In a 'real' scenario the wallet is not set without some gui activity)
-    const char* message[] = { "Warning: debug wallet" };
-    await_message_activity(message, 1);
+    await_message("Warning: debug wallet");
     vTaskDelay(250 / portTICK_PERIOD_MS);
 
     // Copy temporary keychain into a new global keychain

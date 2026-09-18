@@ -30,7 +30,7 @@ gui_view_node_t* make_even_split(const ui_button_layout_t layout, const uint8_t 
     // num_splits range asserted in switch below
 
     // Make the split relevant for the number of buttons
-    typedef void (*make_split_fn)(gui_view_node_t** ptr, enum gui_split_type kind, uint8_t parts, ...);
+    typedef void (*make_split_fn)(gui_view_node_t** ptr, enum gui_split_type kind, int parts, ...);
     make_split_fn make_split = (layout == UI_COLUMN) ? gui_make_vsplit : gui_make_hsplit;
 
     // Make a split for the number of buttons (if greater than one)
@@ -435,11 +435,14 @@ gui_activity_t* display_processing_message_activity()
 }
 
 // Show passed dialog and handle events until a 'yes' or 'no', which is translated into a boolean return
+// Destroys the passed activity before returning.
 // NOTE: only expect BTN_YES, BTN_NO and BTN_HELP events.
 static bool await_yesno_activity_loop(gui_activity_t* const act, const char* help_url)
 {
     JADE_ASSERT(act);
     // help_url is optional (but should be present if a BTN_HELP btn is present)
+
+    gui_activity_t* const prev_act = gui_current_activity(); // Save current activity
 
     while (true) {
         gui_set_current_activity(act);
@@ -465,10 +468,11 @@ static bool await_yesno_activity_loop(gui_activity_t* const act, const char* hel
             break;
         }
     }
+    gui_destroy_current_activity(act, prev_act); // restore previous activity
 }
 
 // Run activity that displays a message and awaits an 'ack' button click
-void await_message_activity(const char* message[], const size_t message_size)
+static void await_message_activity(const char* message[], const size_t message_size)
 {
     btn_data_t ftrbtn = { .txt = "Continue", .font = GUI_DEFAULT_FONT, .ev_id = BTN_YES, .borders = GUI_BORDER_TOP };
 
@@ -478,9 +482,41 @@ void await_message_activity(const char* message[], const size_t message_size)
     JADE_ASSERT(rslt);
 }
 
-void await_error_activity(const char* message[], const size_t message_size)
+void await_message(const char* msg)
 {
-    await_message_activity(message, message_size);
+    const char* m[] = { msg };
+    await_message_activity(m, 1);
+}
+void await_message_2(const char* msg1, const char* msg2)
+{
+    const char* m[] = { msg1, msg2 };
+    await_message_activity(m, 2);
+}
+void await_message_3(const char* msg1, const char* msg2, const char* msg3)
+{
+    const char* m[] = { msg1, msg2, msg3 };
+    await_message_activity(m, 3);
+}
+void await_message_4(const char* msg1, const char* msg2, const char* msg3, const char* msg4)
+{
+    const char* m[] = { msg1, msg2, msg3, msg4 };
+    await_message_activity(m, 4);
+}
+
+void await_error(const char* msg)
+{
+    const char* m[] = { msg };
+    await_message_activity(m, 1);
+}
+void await_error_2(const char* msg1, const char* msg2)
+{
+    const char* m[] = { msg1, msg2 };
+    await_message_activity(m, 2);
+}
+void await_error_3(const char* msg1, const char* msg2, const char* msg3)
+{
+    const char* m[] = { msg1, msg2, msg3 };
+    await_message_activity(m, 3);
 }
 
 // Generic activity that displays a message and Yes/No buttons, and waits
@@ -695,7 +731,6 @@ gui_activity_t* make_progress_bar_activity(const char* title, const char* messag
 
 void update_progress_bar(progress_bar_t* progress_bar, const size_t total, const size_t current)
 {
-#ifndef CONFIG_LIBJADE_NO_GUI
     JADE_ASSERT(progress_bar);
     JADE_ASSERT(progress_bar->progress_bar);
     // progress_bar->pcnt_txt is optional
@@ -710,10 +745,10 @@ void update_progress_bar(progress_bar_t* progress_bar, const size_t total, const
         return;
     }
 
-    if (!progress_bar->progress_bar->render_data.is_first_time) {
+    if (!progress_bar->progress_bar->is_first_render) {
         // Can only reliably update the progress bar after its initial rendering
-        const uint16_t constraints_x1 = progress_bar->progress_bar->render_data.original_constraints.x1;
-        const uint16_t constraints_x2 = progress_bar->progress_bar->render_data.original_constraints.x2;
+        const uint16_t constraints_x1 = progress_bar->progress_bar->constraints.x1;
+        const uint16_t constraints_x2 = progress_bar->progress_bar->constraints.x2;
         const gui_margin_t* const margins = &progress_bar->progress_bar->margins;
         const uint16_t width_bar = constraints_x2 - constraints_x1 - margins->left - margins->right;
         const uint16_t width_shaded = width_bar * current / total;
@@ -731,6 +766,5 @@ void update_progress_bar(progress_bar_t* progress_bar, const size_t total, const
     }
 
     progress_bar->percent_last_value = pcnt;
-#endif
 }
 #endif // AMALGAMATED_BUILD

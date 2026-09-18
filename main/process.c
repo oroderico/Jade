@@ -26,6 +26,9 @@ static RingbufHandle_t ble_out = NULL;
 static RingbufHandle_t qemu_tcp_out = NULL;
 static TaskHandle_t internal_handle = NULL;
 static RingbufHandle_t internal_out = NULL;
+#ifdef CONFIG_LIBJADE
+static RingbufHandle_t libjade_out = NULL;
+#endif
 static jade_msg_source_t last_message_source = SOURCE_NONE;
 
 #ifdef CONFIG_BT_ENABLED
@@ -182,6 +185,11 @@ bool jade_process_init(TaskHandle_t** serial_h, TaskHandle_t** ble_h, TaskHandle
     JADE_ASSERT(internal_out);
 #endif
 
+#ifdef CONFIG_LIBJADE
+    libjade_out = create_ringbuffer(2 * MAX_OUTPUT_MSG_SIZE + 32);
+    JADE_ASSERT(libjade_out);
+#endif
+
 #ifdef CONFIG_HEAP_TRACING
     const esp_err_t err = heap_trace_init_standalone(trace_record, HEAP_TRACING_NUM_RECORDS);
     JADE_LOGW("Failed to initialise heap tracing");
@@ -270,28 +278,22 @@ bool jade_process_push_in_message(const uint8_t* data, const size_t size)
     return true;
 }
 
-bool jade_process_push_in_message_ex(const uint8_t* data, const size_t size, const jade_msg_source_t source)
-{
-    JADE_ASSERT(data);
-    JADE_ASSERT(size);
-    // Post as message into Jade with msg-source prefix
-    const size_t fullsize = size + 1;
-    uint8_t* const fullmsg = JADE_MALLOC(fullsize);
-    fullmsg[0] = source;
-    memcpy(fullmsg + 1, data, size);
-    const bool ret = jade_process_push_in_message(fullmsg, fullsize);
-    free(fullmsg);
-    return ret;
-}
-
 void jade_process_push_out_message(const uint8_t* data, const size_t size, const jade_msg_source_t source)
 {
 #if defined(CONFIG_FREERTOS_UNICORE) && defined(CONFIG_ETH_USE_OPENETH)
     JADE_ASSERT(source == SOURCE_QEMU_TCP || source == SOURCE_SERIAL || source == SOURCE_INTERNAL);
 #elif !defined(CONFIG_BT_ENABLED)
-    JADE_ASSERT(source == SOURCE_SERIAL || source == SOURCE_INTERNAL);
+    JADE_ASSERT(source == SOURCE_SERIAL || source == SOURCE_INTERNAL
+#ifdef CONFIG_LIBJADE
+        || source == SOURCE_LIBJADE
+#endif
+    );
 #else
-    JADE_ASSERT(source == SOURCE_SERIAL || source == SOURCE_BLE || source == SOURCE_INTERNAL);
+    JADE_ASSERT(source == SOURCE_SERIAL || source == SOURCE_BLE || source == SOURCE_INTERNAL
+#ifdef CONFIG_LIBJADE
+        || source == SOURCE_LIBJADE
+#endif
+    );
 #endif
     RingbufHandle_t ring = NULL;
     TaskHandle_t handle = NULL;
@@ -314,6 +316,12 @@ void jade_process_push_out_message(const uint8_t* data, const size_t size, const
     case SOURCE_QEMU_TCP:
         ring = qemu_tcp_out;
         handle = qemu_tcp_handle;
+        break;
+#endif
+#ifdef CONFIG_LIBJADE
+    case SOURCE_LIBJADE:
+        ring = libjade_out;
+        handle = NULL;
         break;
 #endif
     default:
@@ -417,8 +425,7 @@ static void process_cbor_msg(void* ctx, uint8_t* data, size_t size)
     cbor_msg->cbor = JADE_MALLOC(size - 1);
     memcpy(cbor_msg->cbor, data + 1, size - 1);
     cbor_msg->cbor_len = size - 1;
-    CborError cberr
-        = cbor_parser_init(cbor_msg->cbor, cbor_msg->cbor_len, CborValidateBasic, &cbor_msg->parser, &cbor_msg->value);
+    CborError cberr = cbor_parser_init(cbor_msg->cbor, cbor_msg->cbor_len, 0, &cbor_msg->parser, &cbor_msg->value);
     JADE_ASSERT(cberr == CborNoError);
 
     // Set a flag to cache the last received message source
@@ -458,6 +465,11 @@ bool jade_process_get_out_message(outbound_message_writer_fn_t writer, const jad
 #if defined(CONFIG_FREERTOS_UNICORE) && defined(CONFIG_ETH_USE_OPENETH)
     case SOURCE_QEMU_TCP:
         ring = qemu_tcp_out;
+        break;
+#endif
+#ifdef CONFIG_LIBJADE
+    case SOURCE_LIBJADE:
+        ring = libjade_out;
         break;
 #endif
     default:
@@ -545,32 +557,33 @@ void cbor_result_uint64_cb(const void* ctx, CborEncoder* container)
 }
 
 void jade_process_reply_to_message_result(
-    const cbor_msg_t ctx, uint8_t* output, size_t output_size, const void* cbctx, cbor_encoder_fn_t cb)
+    const cbor_msg_t* const ctx, uint8_t* output, size_t output_size, const void* cbctx, cbor_encoder_fn_t cb)
 {
-    JADE_ASSERT(cb);
-    JADE_ASSERT(output);
-    JADE_ASSERT(output_size);
+    JADE_ASSERT(ctx && cb);
+    JADE_ASSERT(output && output_size);
 
     char id[MAXLEN_ID + 1];
     size_t written = 0;
-    rpc_get_id(&ctx.value, id, sizeof(id), &written);
+    rpc_get_id(&ctx->value, id, sizeof(id), &written);
     JADE_ASSERT(written != 0);
 
-    jade_process_reply_to_message_result_with_id(id, output, output_size, ctx.source, cbctx, cb);
+    jade_process_reply_to_message_result_with_id(id, output, output_size, ctx->source, cbctx, cb);
 }
 
-void jade_process_reply_to_message_ok(jade_process_t* process)
+void jade_process_reply_to_message_ok_ex(const cbor_msg_t* const ctx)
 {
     uint8_t buf[64];
     const bool ok = true;
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &ok, cbor_result_boolean_cb);
+    jade_process_reply_to_message_result(ctx, buf, sizeof(buf), &ok, cbor_result_boolean_cb);
 }
+
+void jade_process_reply_to_message_ok(jade_process_t* process) { jade_process_reply_to_message_ok_ex(&process->ctx); }
 
 void jade_process_reply_to_message_fail(jade_process_t* process)
 {
     uint8_t buf[64];
     const bool ok = false;
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &ok, cbor_result_boolean_cb);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), &ok, cbor_result_boolean_cb);
 }
 
 void jade_process_reject_message_with_id(const char* id, int code, const char* message, const uint8_t* data,
@@ -593,29 +606,30 @@ void jade_process_reject_message_with_id(const char* id, int code, const char* m
     }
 }
 
-void jade_process_reject_message_ex(const cbor_msg_t ctx, int code, const char* message, const uint8_t* data,
+void jade_process_reject_message_ex(const cbor_msg_t* const ctx, int code, const char* message, const uint8_t* data,
     const size_t datalen, uint8_t* buffer, const size_t buffer_len)
 {
     char id[MAXLEN_ID + 1];
     size_t written = 0;
-    rpc_get_id(&ctx.value, id, sizeof(id), &written);
+    rpc_get_id(&ctx->value, id, sizeof(id), &written);
     jade_process_reject_message_with_id(
-        written > 0 ? id : "00", code, message, data, datalen, buffer, buffer_len, ctx.source);
+        written > 0 ? id : "00", code, message, data, datalen, buffer, buffer_len, ctx->source);
 }
 
 void jade_process_reject_message(jade_process_t* process, int code, const char* message)
 {
     if (HAS_CURRENT_MESSAGE(process)) {
         uint8_t buf[JADE_MSG_REPLY_LEN];
-        jade_process_reject_message_ex(process->ctx, code, message, NULL, 0, buf, sizeof(buf));
+        jade_process_reject_message_ex(&process->ctx, code, message, NULL, 0, buf, sizeof(buf));
     } else {
         JADE_LOGW("Ignoring attempt to reject 'no-message'");
     }
 }
 
-void jade_process_reply_to_message_bytes(const cbor_msg_t ctx, const uint8_t* data, const size_t datalen)
+void jade_process_reply_to_message_bytes(const cbor_msg_t* const ctx, const uint8_t* data, const size_t datalen)
 {
     // Avoid allocating for small replies
+    JADE_ASSERT(ctx);
     uint8_t buf[JADE_MSG_REPLY_LEN];
     uint8_t* buffer = buf;
     size_t buflen = sizeof(buf);
@@ -636,14 +650,14 @@ void jade_process_reply_to_message_bytes(const cbor_msg_t ctx, const uint8_t* da
     JADE_ASSERT(cberr == CborNoError);
     const char* id = NULL;
     size_t written = 0;
-    rpc_get_id_ptr(&ctx.value, &id, &written);
+    rpc_get_id_ptr(&ctx->value, &id, &written);
     JADE_ASSERT(written != 0);
     rpc_init_cbor(&root_map_encoder, id, written);
     cberr = cbor_encode_byte_string(&root_map_encoder, data, datalen);
     JADE_ASSERT(cberr == CborNoError);
     cberr = cbor_encoder_close_container(&root_encoder, &root_map_encoder);
     JADE_ASSERT(cberr == CborNoError);
-    jade_process_push_out_message(buffer, cbor_encoder_get_buffer_size(&root_encoder, buffer), ctx.source);
+    jade_process_push_out_message(buffer, cbor_encoder_get_buffer_size(&root_encoder, buffer), ctx->source);
 
     if (buffer != buf) {
         // Allocated buffer
@@ -651,9 +665,10 @@ void jade_process_reply_to_message_bytes(const cbor_msg_t ctx, const uint8_t* da
     }
 }
 
-void jade_process_reply_to_message_bytes_sequence(const cbor_msg_t ctx, const size_t seqnum, const size_t seqlen,
+void jade_process_reply_to_message_bytes_sequence(const cbor_msg_t* const ctx, const size_t seqnum, const size_t seqlen,
     const uint8_t* data, const size_t datalen, uint8_t* buffer, const size_t buflen)
 {
+    JADE_ASSERT(ctx);
     CborEncoder root_encoder;
     cbor_encoder_init(&root_encoder, buffer, buflen, 0);
 
@@ -665,13 +680,13 @@ void jade_process_reply_to_message_bytes_sequence(const cbor_msg_t ctx, const si
     JADE_ASSERT(cberr == CborNoError);
     const char* id = NULL;
     size_t written = 0;
-    rpc_get_id_ptr(&ctx.value, &id, &written);
+    rpc_get_id_ptr(&ctx->value, &id, &written);
     JADE_ASSERT(written != 0);
     rpc_init_cbor_with_sequence(&root_map_encoder, id, written, seqnum, seqlen);
     cberr = cbor_encode_byte_string(&root_map_encoder, data, datalen);
     JADE_ASSERT(cberr == CborNoError);
     cberr = cbor_encoder_close_container(&root_encoder, &root_map_encoder);
     JADE_ASSERT(cberr == CborNoError);
-    jade_process_push_out_message(buffer, cbor_encoder_get_buffer_size(&root_encoder, buffer), ctx.source);
+    jade_process_push_out_message(buffer, cbor_encoder_get_buffer_size(&root_encoder, buffer), ctx->source);
 }
 #endif // AMALGAMATED_BUILD

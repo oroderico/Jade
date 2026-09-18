@@ -3,6 +3,7 @@
 #include "jade_assert.h"
 #include "keychain.h"
 #include "qrcode.h"
+#include "qrmode.h"
 #include "qrscan.h"
 #include "ui.h"
 #include "utils/malloc_ext.h"
@@ -70,22 +71,19 @@ static const uint32_t QR_SCALE_FACTOR[] = { 0, 6, 5, 4, 4, 3, 3, 2, 2, 2, 2, 2, 
 bool bcur_parse_bip39(
     const uint8_t* cbor, const size_t cbor_len, char* mnemonic, const size_t mnemonic_len, size_t* written)
 {
-    JADE_ASSERT(cbor);
-    JADE_ASSERT(cbor_len);
-    JADE_ASSERT(mnemonic);
-    JADE_ASSERT(mnemonic_len);
+    JADE_ASSERT(cbor && cbor_len);
+    JADE_ASSERT(mnemonic && mnemonic_len == MNEMONIC_BUFLEN);
     JADE_INIT_OUT_SIZE(written);
 
     // Parse cbor
     CborValue value;
     CborParser parser;
-    CborError cberr = cbor_parser_init(cbor, cbor_len, CborValidateCompleteData, &parser, &value);
-    if (cberr != CborNoError || !cbor_value_is_valid(&value) || !cbor_value_is_container(&value)) {
+    if (!rpc_untrusted_parser_init(cbor, cbor_len, &parser, &value) || !cbor_value_is_container(&value)) {
         return false;
     }
 
     CborValue mapItem;
-    cberr = cbor_value_enter_container(&value, &mapItem);
+    CborError cberr = cbor_value_enter_container(&value, &mapItem);
     if (cberr != CborNoError || !cbor_value_is_valid(&mapItem)) {
         return false;
     }
@@ -99,9 +97,9 @@ bool bcur_parse_bip39(
     if (cberr != CborNoError || !cbor_value_is_valid(&mapItem) || !cbor_value_is_array(&mapItem)) {
         return false;
     }
-    size_t number_of_words = 0;
-    cberr = cbor_value_get_array_length(&mapItem, &number_of_words);
-    if (cberr != CborNoError || !number_of_words || !cbor_value_is_container(&mapItem)) {
+    size_t num_words = 0;
+    cberr = cbor_value_get_array_length(&mapItem, &num_words);
+    if (cberr != CborNoError || (num_words != 12 && num_words != 24) || !cbor_value_is_container(&mapItem)) {
         return false;
     }
     CborValue arrayItem;
@@ -110,23 +108,31 @@ bool bcur_parse_bip39(
         return false;
     }
     size_t write_pos = 0;
-    for (size_t i = 0; i < number_of_words; ++i) {
+    for (size_t i = 0; i < num_words; ++i) {
+        JADE_ASSERT(write_pos < MNEMONIC_BUFLEN - MNEMONIC_MAX_WORD_LEN - 1);
         if (write_pos) {
             // Add space separator
             mnemonic[write_pos++] = ' ';
         }
 
+        if (!cbor_value_is_text_string(&arrayItem)) {
+            return false; // Non-string in array
+        }
+
+        // Copy the next word
         CborValue next;
-        size_t tmp_len = mnemonic_len - write_pos;
+        size_t tmp_len = MNEMONIC_MAX_WORD_LEN + 1;
         cberr = cbor_value_copy_text_string(&arrayItem, mnemonic + write_pos, &tmp_len, &next);
-        JADE_ASSERT(cberr == CborNoError);
+        if (cberr != CborNoError || !tmp_len) {
+            return false;
+        }
         write_pos += tmp_len;
         arrayItem = next;
     }
-    JADE_ASSERT(cbor_value_at_end(&arrayItem));
+    if (!cbor_value_at_end(&arrayItem)) {
+        return false;
+    }
     cberr = cbor_value_leave_container(&mapItem, &arrayItem);
-    JADE_ASSERT(cberr == CborNoError);
-
     if (cberr != CborNoError || !cbor_value_is_valid(&mapItem) || !cbor_value_is_integer(&mapItem)) {
         return false;
     }
@@ -147,14 +153,17 @@ bool bcur_parse_bip39(
         return false;
     }
     cberr = cbor_value_advance(&mapItem);
-    JADE_ASSERT(cberr == CborNoError && cbor_value_at_end(&mapItem));
+    if (cberr != CborNoError || !cbor_value_at_end(&mapItem)) {
+        return false;
+    }
 
     cberr = cbor_value_leave_container(&value, &mapItem);
-    JADE_ASSERT(cberr == CborNoError);
+    if (cberr != CborNoError) {
+        return false;
+    }
 
     mnemonic[write_pos++] = '\0';
     *written = write_pos;
-
     return true;
 }
 
@@ -216,8 +225,7 @@ bool bcur_parse_bytes(const uint8_t* cbor, size_t cbor_len, const uint8_t** byte
     // Parse cbor
     CborValue value;
     CborParser parser;
-    const CborError cberr = cbor_parser_init(cbor, cbor_len, CborValidateCompleteData, &parser, &value);
-    if (cberr != CborNoError || !cbor_value_is_valid(&value)) {
+    if (!rpc_untrusted_parser_init(cbor, cbor_len, &parser, &value)) {
         return false;
     }
 
@@ -261,8 +269,7 @@ bool bcur_parse_jade_message(const uint8_t* cbor, size_t cbor_len, CborParser* p
     // params is optional
 
     // Parse cbor
-    CborError cberr = cbor_parser_init(cbor, cbor_len, CborValidateCompleteData, parser, root);
-    if (cberr != CborNoError || !cbor_value_is_valid(root) || !cbor_value_is_map(root)) {
+    if (!rpc_untrusted_parser_init(cbor, cbor_len, parser, root) || !cbor_value_is_map(root)) {
         JADE_LOGE("Failed to parse bcur cbor message");
         return false;
     }
@@ -282,7 +289,7 @@ bool bcur_parse_jade_message(const uint8_t* cbor, size_t cbor_len, CborParser* p
     // If caller also wants params, the params map must be present
     // If caller hasn't asked for params, they are allowed to not be present.
     if (params) {
-        cberr = cbor_value_map_find_value(root, CBOR_RPC_TAG_PARAMS, params);
+        const CborError cberr = cbor_value_map_find_value(root, CBOR_RPC_TAG_PARAMS, params);
         if (cberr != CborNoError || !cbor_value_is_valid(params) || cbor_value_get_type(params) == CborInvalidType
             || !cbor_value_is_map(params)) {
             JADE_LOGE("Failed to fetch parameters map");
@@ -648,16 +655,8 @@ static bool collect_any_bcur(qr_data_t* qr_data)
     return decoded;
 }
 
-// Scan a QR code that may be a BC-UR code/fragment - ie. single-frame or animated/multi-frame.
-// Returns true if a complete (ie. potentially multi-frame) bc-ur code is scanned, or if a single
-// non-BC-UR frame is scanned successfully.
-// If BC-UR, the complete scanned payload and its BC-UR 'type' are returned.
-// NOTE: output is expected to be a valid CBOR message, although this is not validated.
-// If not BC-UR, the scanned payload is returned with a type of NULL.
-// In either case the caller takes ownership, and must free the output data bytes and any type string.
-// Returns false if scanning fails or is abandoned - in which case there is nothing to free.
-bool bcur_scan_qr(
-    const char* prompt_text, char** output_type, uint8_t** output, size_t* output_len, const char* help_url)
+bool bcur_scan_qr(const char* prompt_text, char** output_type, uint8_t** output, size_t* output_len, size_t offset,
+    const char* help_url)
 {
     // prompt_text is optional
     JADE_INIT_OUT_PPTR(output_type);
@@ -688,17 +687,17 @@ bool bcur_scan_qr(
         JADE_ASSERT(result_type);
 
         // Copy payload and bc-ur type
-        *output = JADE_MALLOC_PREFER_SPIRAM(result_len);
-        memcpy(*output, result, result_len);
-        *output_len = result_len;
+        *output = JADE_MALLOC_PREFER_SPIRAM(result_len + offset);
+        memcpy(*output + offset, result, result_len);
+        *output_len = result_len + offset;
         *output_type = strdup(result_type);
     } else {
         // Not a bc-ur code - copy straight payload and append a nul-terminator.
         // Leave bc-ur type as NULL to indicate data was not a bc-ur payload.
-        *output = JADE_MALLOC(qr_data.len + 1);
-        memcpy(*output, qr_data.data, qr_data.len);
-        (*output)[qr_data.len] = '\0';
-        *output_len = qr_data.len;
+        *output = JADE_MALLOC(qr_data.len + offset + 1);
+        memcpy(*output + offset, qr_data.data, qr_data.len);
+        (*output)[qr_data.len + offset] = '\0';
+        *output_len = qr_data.len + offset;
         *output_type = NULL;
     }
 

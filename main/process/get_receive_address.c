@@ -1,4 +1,6 @@
 #ifndef AMALGAMATED_BUILD
+#include <inttypes.h>
+
 #include "../descriptor.h"
 #include "../gui.h"
 #include "../jade_assert.h"
@@ -47,8 +49,8 @@ void get_receive_address_process(void* process_ptr)
     const uint8_t* p_master_blinding_key = NULL;
     size_t master_blinding_key_len = 0;
 
-    bool confidential = isLiquid; // default to confidential addresses for liquid
-    rpc_get_boolean("confidential", &params, &confidential);
+    // Defaults to confidential addresses for liquid
+    const bool confidential = rpc_get_bool_or("confidential", &params, isLiquid);
     if (confidential && !isLiquid) {
         jade_process_reject_message(
             process, CBOR_RPC_BAD_PARAMETERS, "Confidential addresses only apply to liquid networks");
@@ -93,8 +95,7 @@ void get_receive_address_process(void* process_ptr)
             master_blinding_key_len = sizeof(multisig_master_blinding_key);
         }
     } else if (rpc_has_field_data("descriptor_name", &params)) {
-        // Not valid for liquid wallets atm
-        if (isLiquid) {
+        if (isLiquid && !descriptor_allow_liquid()) {
             jade_process_reject_message(
                 process, CBOR_RPC_BAD_PARAMETERS, "Descriptor wallets not supported on liquid network");
             goto cleanup;
@@ -111,9 +112,9 @@ void get_receive_address_process(void* process_ptr)
         }
 
         // The path is given in two parts - optional (change) branch and mandatory index pointer
-        size_t branch = 0, pointer = 0;
-        rpc_get_sizet("branch", &params, &branch); // optional
-        if (!rpc_get_sizet("pointer", &params, &pointer)) {
+        const uint32_t branch = rpc_get_uint32_or("branch", &params, 0); // optional
+        uint32_t pointer = 0;
+        if (!rpc_get_uint32("pointer", &params, &pointer)) {
             jade_process_reject_message(
                 process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract path elements from parameters");
             goto cleanup;
@@ -124,6 +125,12 @@ void get_receive_address_process(void* process_ptr)
                 sizeof(script), &script_len, &errmsg)) {
             jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, "Failed to generate valid descriptor script");
             goto cleanup;
+        }
+
+        if (confidential) {
+            // Use the wallet's own master blinding key (the descriptor's @B blinding key)
+            p_master_blinding_key = keychain_get()->master_unblinding_key;
+            master_blinding_key_len = sizeof(keychain_get()->master_unblinding_key);
         }
     } else {
         uint32_t path[MAX_PATH_LEN];
@@ -143,9 +150,9 @@ void get_receive_address_process(void* process_ptr)
 
         if (is_greenaddress(script_variant)) {
             // For green-multisig the path is constructed from subaccount, branch and pointer
-            size_t subaccount = 0, branch = 0, pointer = 0;
-            if (!rpc_get_sizet("subaccount", &params, &subaccount) || !rpc_get_sizet("branch", &params, &branch)
-                || !rpc_get_sizet("pointer", &params, &pointer)) {
+            uint32_t subaccount = 0, branch = 0, pointer = 0;
+            if (!rpc_get_uint32("subaccount", &params, &subaccount) || !rpc_get_uint32("branch", &params, &branch)
+                || !rpc_get_uint32("pointer", &params, &pointer)) {
                 jade_process_reject_message(
                     process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract path elements from parameters");
                 goto cleanup;
@@ -158,12 +165,11 @@ void get_receive_address_process(void* process_ptr)
             rpc_get_string("recovery_xpub", sizeof(xpubrecovery), &params, xpubrecovery, &written);
 
             // Optional 'blocks' for csv outputs
-            size_t csv_blocks = 0;
-            rpc_get_sizet("csv_blocks", &params, &csv_blocks);
+            const uint32_t csv_blocks = rpc_get_uint32_or("csv_blocks", &params, 0);
 
             if (csv_blocks && !network_is_known_csv_blocks(network_id, csv_blocks)) {
                 const int ret
-                    = snprintf(warning_msg, sizeof(warning_msg), "\nWarning:\nNon-standard csv:\n%u", csv_blocks);
+                    = snprintf(warning_msg, sizeof(warning_msg), "\nWarning:\nNon-standard csv:\n%" PRIu32, csv_blocks);
                 JADE_ASSERT(ret > 0 && ret < sizeof(warning_msg));
             }
 
@@ -176,8 +182,7 @@ void get_receive_address_process(void* process_ptr)
             }
         } else if (is_singlesig(script_variant)) {
             // For single-sig the path is explicit in the params
-            rpc_get_bip32_path("path", &params, path, max_path_len, &path_len);
-            if (path_len == 0) {
+            if (!rpc_get_bip32_path("path", &params, path, max_path_len, &path_len) || path_len == 0) {
                 jade_process_reject_message(
                     process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract valid path from parameters");
                 goto cleanup;
@@ -260,13 +265,12 @@ void get_receive_address_process(void* process_ptr)
 
     // Show warning if necessary
     if (warning_msg[0] != '\0') {
-        const char* message[] = { warning_msg };
-        await_message_activity(message, 1);
+        await_message(warning_msg);
     }
 
     // Reply with the address
     uint8_t buf[256];
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), address, cbor_result_string_cb);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), address, cbor_result_string_cb);
 
     JADE_LOGI("Success");
 

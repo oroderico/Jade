@@ -136,32 +136,6 @@ except ImportError as e:
     logger.info('Default _http_requests() function will not be available')
 
 
-def generate_dump():
-    while True:
-        try:
-            with socket.create_connection(('localhost', 4444)) as s:
-                output = b""
-                while b'Open On-Chip Debugger' not in output:
-                    data = s.recv(1024)
-                    if not data:
-                        continue
-                    output += data
-
-                s.sendall(b'esp gcov dump\n')
-
-                output = b''
-                while b'Targets disconnected.' not in output:
-                    data = s.recv(1024)
-                    if not data:
-                        continue
-                    output += data
-                s.sendall(b'resume\n')
-                time.sleep(1)
-            return
-        except ConnectionRefusedError:
-            pass
-
-
 class JadeAPI:
     """
     High-Level Jade Client API
@@ -590,9 +564,6 @@ class JadeAPI:
             if (cb):
                 cb(written, cmplen, result if have_extended_reply else None)
 
-        if gcov_dump:
-            self.run_remote_gcov_dump()
-
         # All binary data uploaded
         return self._jadeRpc('ota_complete')
 
@@ -611,19 +582,14 @@ class JadeAPI:
 
     def run_remote_gcov_dump(self):
         """
-        RPC call to run in-built gcov-dump.
-        NOTE: Only available in a DEBUG build of the firmware.
+        Deprecated, has no effect.
 
         Returns
         -------
         bool
             Always True.
         """
-        result = self._jadeRpc('debug_gcov_dump', long_timeout=True)
-        time.sleep(0.5)
-        generate_dump()
-        time.sleep(2)
-        return result
+        return True
 
     def capture_image_data(self, check_qr=False):
         """
@@ -651,7 +617,7 @@ class JadeAPI:
         RPC call to scan a passed image and return any data extracted from any qr image.
         Exercises the camera image capture, but ignores result and uses passed image instead.
         See also capture_image_data() above.
-        NOTE: Only available in a DEBUG build of the firmware.
+        NOTE: Only available in custom-configured DEBUG builds of the firmware.
 
         Parameters
         ----------
@@ -757,6 +723,32 @@ class JadeAPI:
                   'index': index,
                   'pubkey': pubkey}
         return self._jadeRpc('get_bip85_bip39_entropy', params)
+
+    def show_bip85_bip39_entropy(self, num_words, index, pubkey):
+        """
+        RPC call to show bip85-bip39 entropy as a qr code.
+
+        Parameters
+        ----------
+        num_words : int
+            The number of words the entropy is required to produce.
+
+        index : int
+            The index to use in the bip32 path to calculate the entropy.
+
+        pubkey: 33-bytes
+            The host ephemeral pubkey to use to generate a shared ecdh secret to use as an AES key
+            to encrypt the returned entropy.
+
+        Returns
+        -------
+        bool
+            True on success.
+        """
+        params = {'num_words': num_words,
+                  'index': index,
+                  'pubkey': pubkey}
+        return self._jadeRpc('show_bip85_bip39_entropy', params)
 
     def get_bip85_rsa_entropy(self, key_bits, index, pubkey):
         """
@@ -1134,6 +1126,14 @@ class JadeAPI:
         descriptor_name : string
             Name to use to identify this descriptor wallet registration record.
             If a registration record exists with the name given, that record is overwritten.
+
+        descriptor_script : string
+            The text of the output descriptor as a BIP 388 wallet policy.
+
+        datavalues : dict
+            A dict of BIP 388 key placeholders (e.g. "@1") to key expressions. For
+            Liquid confidential descriptors, the blinding key placeholder used
+            in the "ct()" wrapper must be named "@B".
 
         Returns
         -------
@@ -2051,6 +2051,8 @@ class JadeInterface:
     def __init__(self, impl):
         assert impl is not None
         self.impl = impl
+        # Support older cbor2 versions that return EOFError
+        self.EOFError = getattr(cbor, 'CBORDecodeEOF', EOFError)
 
     def __enter__(self):
         self.connect()
@@ -2265,7 +2267,7 @@ class JadeInterface:
             The request formatted as cbor message bytes
         """
         dump = cbor.dumps(request)
-        logger.info(f'Sending {request["method"]} request {request["id"]} length {len(dump)}')
+        logger.debug(f'Sending {request["method"]} request {request["id"]} length {len(dump)}')
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f'Sending: {_hexlify(request)}')
         return dump
@@ -2317,6 +2319,15 @@ class JadeInterface:
         # logger.debug(f'Received: {len(bytes_)} bytes')
         return bytes_
 
+    def readable(self):
+        return True  # Act like a file-like object
+
+    def writable(self):
+        return True  # Act like a file-like object
+
+    def seekable(self):
+        return False  # Act like a file-like object
+
     def read_cbor_message(self):
         """
         Try to read a single cbor (response) message from the underlying interface.
@@ -2331,19 +2342,18 @@ class JadeInterface:
         """
         while True:
             # 'self' is sufficiently 'file-like' to act as a load source.
-            # Throws EOFError on end of stream/timeout/lost-connection etc.
+            # Throws self.EOFError on end of stream/timeout/lost-connection etc.
             message = cbor.load(self)
 
             if isinstance(message, collections.abc.Mapping):
-                # A message response (to a prior request)
                 if 'id' in message:
-                    logger.info(f'Received reply {message["id"]}')
+                    # A message response (to a prior request)
                     if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f'Received: {_hexlify(message)}')
+                        logger.debug(f'Received reply {message["id"]}: {_hexlify(message)}')
                     return message
 
-                # A log message - handle as normal
                 if 'log' in message:
+                    # A log message - log it using the appropriate level
                     response = message['log']
                     log_method = device_logger.error
                     try:
@@ -2388,7 +2398,7 @@ class JadeInterface:
         while True:
             try:
                 return self.read_cbor_message()
-            except EOFError as _:
+            except self.EOFError as _:
                 if not long_timeout:
                     raise
 

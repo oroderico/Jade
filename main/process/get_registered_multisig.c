@@ -124,7 +124,7 @@ void get_registered_multisig_process(void* process_ptr)
 
     bool asfile = false;
     if (rpc_has_field_data("as_file", &params)) {
-        if (!rpc_get_boolean("as_file", &params, &asfile)) {
+        if (!rpc_get_bool("as_file", &params, &asfile)) {
             jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, "Failed to extract valid as_file parameter");
             goto cleanup;
         }
@@ -179,7 +179,7 @@ void get_registered_multisig_process(void* process_ptr)
         .multisig_export_file = export_file,
         .multisig_data = &multisig_data,
         .signer_details = signer_details };
-    jade_process_reply_to_message_result(process->ctx, buf, buflen, &multisig_details, reply_registered_multisig);
+    jade_process_reply_to_message_result(&process->ctx, buf, buflen, &multisig_details, reply_registered_multisig);
     free(buf);
 
     JADE_LOGI("Success");

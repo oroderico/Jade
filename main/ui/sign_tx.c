@@ -4,6 +4,7 @@
 #include <wally_elements.h>
 #include <wally_transaction.h>
 
+#include "../assets.h"
 #include "../button_events.h"
 #include "../jade_assert.h"
 #include "../jade_wally_verify.h"
@@ -33,6 +34,8 @@ static const uint32_t POW_10[9] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10
 
 static uint32_t get_asset_scale_factor(const asset_info_t* asset_info)
 {
+    // Sanity check to ensure the scale factor array is large enough to hold all possible precisions
+    JADE_STATIC_ASSERT(sizeof(POW_10) / sizeof(POW_10[0]) == ASSET_PRECISION_MAX + 1);
     JADE_ASSERT(asset_info && asset_info->precision < sizeof(POW_10) / sizeof(POW_10[0]));
     return POW_10[asset_info->precision];
 }
@@ -42,6 +45,8 @@ static uint32_t get_asset_scale_factor(const asset_info_t* asset_info)
 static bool display_output(
     const struct wally_tx_output* outputs, const output_info_t* output_info, const size_t i, const bool show_scriptless)
 {
+    JADE_ASSERT(outputs);
+
     if (!show_scriptless && !outputs[i].script) {
         // Hide outputs with no script
         return false;
@@ -53,8 +58,9 @@ static bool display_output(
             return true;
         }
 
-        if (output_info[i].flags & OUTPUT_FLAG_VALIDATED && output_info[i].flags & OUTPUT_FLAG_CHANGE) {
+        if (output_info[i].flags & OUTPUT_FLAG_CHANGE) {
             // Hide change outputs which have already been internally validated
+            JADE_ASSERT(output_info[i].flags & OUTPUT_FLAG_IS_OURS);
             return false;
         }
     }
@@ -66,6 +72,8 @@ static bool display_output(
 static uint32_t displayable_outputs(
     const struct wally_tx* tx, const output_info_t* output_info, const bool show_scriptless)
 {
+    JADE_ASSERT(tx && tx->num_outputs <= UINT32_MAX);
+
     uint32_t nDisplayable = 0;
     for (size_t i = 0; i < tx->num_outputs; ++i) {
         if (display_output(tx->outputs, output_info, i, show_scriptless)) {
@@ -74,7 +82,7 @@ static uint32_t displayable_outputs(
     }
 
     // If we would hide all outputs, then don't hide any
-    return nDisplayable > 0 ? nDisplayable : tx->num_outputs;
+    return nDisplayable > 0 ? nDisplayable : (uint32_t)tx->num_outputs;
 }
 
 // Lookup the passed asset-id in the asset data, and return the asset-id, issuer,
@@ -441,7 +449,7 @@ bool show_btc_transaction_outputs_activity(
         // Free all existing activities between outputs
         gui_set_current_activity_ex(act_clear, true);
 
-        const bool is_wallet_output = output_info && (output_info[i].flags & OUTPUT_FLAG_VALIDATED);
+        const bool is_wallet_output = output_info && (output_info[i].flags & OUTPUT_FLAG_IS_OURS);
 
         char title[16];
         int ret = snprintf(title, sizeof(title), "Output %ld/%ld", nDisplayedOutput, nTotalOutputsDisplayed);
@@ -503,7 +511,7 @@ bool show_elements_transaction_outputs_activity(const network_t network_id, cons
         // Free all existing activities between outputs
         gui_set_current_activity_ex(act_clear, true);
 
-        const bool is_wallet_output = output_info[i].flags & OUTPUT_FLAG_VALIDATED;
+        const bool is_wallet_output = output_info[i].flags & OUTPUT_FLAG_IS_OURS;
 
         char title[16];
         const int ret = snprintf(title, sizeof(title), "Output %ld/%ld", nDisplayedOutput, nTotalOutputsDisplayed);

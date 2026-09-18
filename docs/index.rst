@@ -19,7 +19,7 @@ Welcome to Jade's RPC documentation!
 * Several calls require a `network` parameter.  Allowed values are: 'mainnet' and 'liquid'. If using a test wallet, 'testnet', 'testnet-liquid', 'localtest' and 'localtest-liquid' are allowed.
 * Successful action replies include a `result` structure, specific to each method.
 * Failed/errored/declined actions instead include a common `error` structure.
-  
+
 .. _common_error_reply:
 
 common error reply
@@ -39,7 +39,7 @@ common error reply
 * 'code' values are listed in `main/utils/cbor_rpc.h`.
 * 'message' should be a meaningful string describing the error encountered.
 * 'data' content is optional, and usually unused/null.
-  
+
 .. _get_extended_data_request:
 
 get_extended_data request
@@ -159,15 +159,15 @@ get_version_info reply
 * 'BATTERY_STATUS' : positive integer value up to 5 (fully charged).
 
 * 'JADE_STATE' :
-  
+
   - 'UNINIT' - no wallet set on the hw, mnemonic not entered, unit uninitialised.
   - 'UNSAVED' - wallet mnemonic has been set on hw, but not yet persisted with blind pinserver.
   - 'LOCKED' - wallet set, but currently locked - requires PIN entry to unlock.
   - 'READY' - wallet set and unlocked for this interface, ready to use.
   - 'TEMP' - hw currently set with a temporary ('Emergency Restore') wallet, ready to use.
-    
+
 * 'JADE_NETWORKS' :
-  
+
   - 'MAIN' - wallet is locked to mainnet/production networks and cannot be used on testnet or regtest networks.
   - 'TEST' - wallet is locked to testnet/regtest/localtest networks, and cannot be used on mainnet or liquid production networks.
   - 'ALL' - wallet is not (yet) locked to a specific network type.
@@ -616,7 +616,7 @@ Jade can store up to 16 user-defined miniscript descriptor wallet configurations
             "network": "mainnet",
             "descriptor_name": "inheritance",
             "descriptor": "wsh(or_d(pk(@0/<0;1>/*),and_v(v:multi(2,@1/<0;1>/*,@2/<0;1>/*),older(4320))))",
-            "datavalues": [
+            "datavalues": {
                 {
                     "key": "@0",
                     "value": "[1bf12fe0/48'/1'/0'/2']tpubDEHXLZfMAAM5duEnX6SSnZjGYbrxqXvRJmMxw8MFwr3gu4LC4DSxR9KVEfVDVcZxre4XL5tGcwVRrHwQ9euTMnSq6P6BqREemaqrFsC96Fy",
@@ -629,13 +629,14 @@ Jade can store up to 16 user-defined miniscript descriptor wallet configurations
                     "key": "@2",
                     "value": "[e1640396/48'/1'/0'/2']tpubDFgDvZifofePphQiVjLfkov8YTDg3UPuHRvt6LzbySYMZQhN19p6zvR7NTEXi1ZJAMNostHMTnz2sfXXYcJFQqtyCnNuUfgYqsahxTLGJq2",
                 }
-            ]
+            }
         }
     }
 
 * 'descriptor_name' is a string, and must be less than 16 characters long.  Using an existing name will overwrite the corresponding descriptor registration record.
-* 'descriptor' is the descriptor string.  It must be a 'wallet policy' miniscript expression with the keys presented in the accompanying datavalues map.
-* 'datavalues' is the map of signers' keys, which must include an entry for the Jade signer.
+* 'descriptor' is the descriptor string.  It must be a BIP 388 'wallet policy' miniscript expression with the keys presented in the accompanying datavalues map.
+* 'datavalues' is the map of signers' keys, which must include an entry for the Jade signer. For Liquid confidential descriptors, the blinding key placeholder used in the "ct()" wrapper must be named "@B".
+
 
 .. _register_descriptor_reply:
 
@@ -775,7 +776,7 @@ or:
 * 'derivation' is the path from the origin to the given xpub - currently it is only used for the Jade signer, where it is used to verify the passed xpub.
 * 'xpub' is the signer xpub, as described by the 'fingerprint' and 'derivation' (validated, in the case of this unit's signer).
 * 'path' is a path applied to the xpub, to yield the root signer for this multisig.  In most cases this is empty '[]'.
-* Alternatively, the contents of the multisig wallet file as produced by several wallet apps (BluwWallet, Sparrow, Nunchuk etc.) can be passed.
+* Alternatively, the contents of the multisig wallet file as produced by several wallet apps (BlueWallet, Sparrow, Nunchuk etc.) can be passed.
 
 
 .. _register_multisig_reply:
@@ -1177,7 +1178,7 @@ sign_bip85_digests reply
 
 * 'result' is an array of signatures, corresponding to the array of digests passed in.
 
-  
+
 .. _get_identity_pubkey_request:
 
 get_identity_pubkey request
@@ -1500,7 +1501,7 @@ multi-sig:
         "multisig_name": "small_beans",
         "paths": [ [0,1], [0,1] ]
     }
-  
+
 .. _sign_tx_legacy_reply:
 
 sign_tx reply (legacy)
@@ -1815,7 +1816,7 @@ Used to fetch a script-specific blinding nonce.
 * 'their_pubkey' needs to be the EC public key of the counterparty for the given script.
 * 'include_pubkey' is an optional boolean field.  If present and 'true' the reply will also include the public blinding key for the script (see get_blinding_key_request_).
 * 'multisig_name' is optional and defaults to null.  It is only used for registered multisig wallets.
- 
+
 .. _get_shared_nonce_reply:
 
 get_blinding_nonce reply
@@ -1865,7 +1866,7 @@ Used to fetch a deterministic output blinding factor (abf/assetblinder or vbf/va
 * 'hash_prevout' should be the double sha256 of the serialization of all input outpoints, as documented in bip143.
 * 'type' must be either 'ASSET', 'VALUE', or 'ASSET_AND_VALUE'.
 * 'multisig_name' is optional and defaults to null.  It is only used for registered multisig wallets.
- 
+
 .. _get_blinding_factor_reply:
 
 get_blinding_factor reply
@@ -1907,7 +1908,7 @@ Used to fetch output commitments - ie. returns blinded output (and associated bl
 * 'vbf' is an optional override, and defaults to null, in which case the value is calculated.
 * 'vbf' is provided for one output, so the tx commitment values sum correctly.
 * 'multisig_name' is optional and defaults to null.  It is only used for registered multisig wallets.
- 
+
 .. _get_commitments_reply:
 
 get_commitments reply
@@ -1946,6 +1947,7 @@ Request to sign liquid transaction inputs.
         "method": "sign_liquid_tx",
         "params": {
             "network": "testnet-liquid",
+            "genesis_hash": <bytes>,
             "txn": <bytes>,
             "num_inputs": 4,
             "use_ae_signatures": false,
@@ -2017,6 +2019,7 @@ Request to sign liquid transaction inputs.
     }
 
 * Most fields are as described in sign_tx_legacy_request_.
+* 'genesis_hash' is optional, but if passed should be an ELIP-101 compatible genesis blockhash for the network being signed for. Only valid for Liquid regtest and Liquid testnet networks.
 * 'asset_info' is optional, but if passed should be the asset-id, contract and issuance-prevout sections of the asset registry data pertinent to the assets being transacted.  If present, this allows the transaction details displayed on Jade to include assets' name, issuer and ticker fields, rather than just asset-id alone.  NOTE: if passed, this data must be accurate as obtained from the asset registry json, and the fields in the expected (ie. alphabetical) order.  'asset_info' for the network policy-asset is not required.
 * 'trusted_commitments' must be passed in for each blinded output.  Where an output is not blinded (eg. fee output) null may be passed.If 'asset_generator' and 'value_commitment' are included, they must match the value in the matching transaction output being signed.
 * 'trusted_commitments' entries passed in here can be obtained using the get_commitments_request_, with the relevant 'blinding_key' added (which would originally be obtained from get_blinding_key_request_).
@@ -2194,6 +2197,43 @@ get_signature reply (sign_liquid_tx)
 
 * 'result' will be the bytes for the signature for the corresponding input, in DER format with the sighash appended.
 * 'result' will be empty, if no signature was required for this input.
+
+.. _show_bip85_bip39_entropy_request:
+
+show_bip85_bip39_entropy request
+--------------------------------
+
+Request to show bip85-bip39 entropy as a qr code.
+
+.. code-block:: cbor
+
+    {
+        "id": "256",
+        "method": "show_bip85_bip39_entropy",
+        "params": {
+            "num_words": 12,
+            "index": 0,
+            "pubkey": <33 bytes>
+        }
+    }
+
+* 'num_words' the number of words the entropy is required to produce (must be 12 or 24).
+* 'index' the index to use in the bip32 path to calculate the entropy.
+* 'pubkey' the host ephemeral pubkey to use to generate a shared ecdh secret to use as an AES key to encrypt the returned entropy.
+
+.. _show_bip85_bip39_entropy_reply:
+
+show_bip85_bip39_entropy reply
+------------------------------
+
+* NOTE: The reply is not sent until the user has explicitly confirmed on the hw. It is sent once the QR code is displayed, before the user closes the QR screen.
+
+.. code-block:: cbor
+
+    {
+        "id": "256",
+        "result": true
+    }
 
 Indices and tables
 ==================

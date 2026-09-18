@@ -41,8 +41,7 @@ void get_otp_code_process(void* process_ptr)
         JADE_LOGE("No wallet seed available.  Wallet must be re-initialised from mnemonic.");
         jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Feature requires resetting Jade");
 
-        const char* message[] = { "Feature requires Jade reset" };
-        await_error_activity(message, 1);
+        await_error("Feature requires Jade reset");
         goto cleanup;
     }
 
@@ -72,7 +71,7 @@ void get_otp_code_process(void* process_ptr)
     // totp token/code updates with time - but we disable that if an explicit epoch value is passed
     bool auto_update = true;
 #ifdef CONFIG_DEBUG_MODE
-    if (rpc_get_uint64_t("override", &params, &value)) {
+    if (rpc_get_uint64("override", &params, &value)) {
         otp_set_explicit_value(&otp_ctx, value);
         auto_update = false; // frozen on passed override value
     }
@@ -94,7 +93,7 @@ void get_otp_code_process(void* process_ptr)
     JADE_LOGD("User pressed accept");
 
     uint8_t buf[64];
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), token, cbor_result_string_cb);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), token, cbor_result_string_cb);
 
     JADE_LOGI("Success");
 

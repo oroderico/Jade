@@ -309,6 +309,9 @@ def ota(args, jade, info, extended_replies):
     # Fetch the firmware to upload
     fwlength, patchlen, fwhash, fwcompressed = get_firmware(args)
 
+    if jade is None:
+        return  # Downloading only
+
     has_pin = info['JADE_HAS_PIN']
     chunksize = int(info['JADE_OTA_MAX_CHUNK'])
     assert chunksize > 0
@@ -360,7 +363,7 @@ def ota(args, jade, info, extended_replies):
     result = jade.ota_update(fwcompressed, fwlength, chunksize, fwhash,
                              patchlen=patchlen, cb=_log_progress,
                              extended_replies=extended_replies,
-                             gcov_dump=info.get('GCOV', False))
+                             gcov_dump=False)
     assert result is True
 
     logger.info(f'Total ota time in secs: {time.time() - start_time}')
@@ -385,6 +388,12 @@ if __name__ == '__main__':
                         dest='serialport',
                         help='Serial port or device',
                         default=None)
+    parser.add_argument('--serialtimeout',
+                        action='store',
+                        dest='serialtimeout',
+                        type=int,
+                        help='Serial port timeout',
+                        default=120)
 
     blegrp = parser.add_mutually_exclusive_group()
     blegrp.add_argument('--skipble',
@@ -519,7 +528,7 @@ if __name__ == '__main__':
 
         if not args.skipserial:
             logger.info(f'Jade OTA over serial')
-            with JadeAPI.create_serial(device=args.serialport) as jade:
+            with JadeAPI.create_serial(device=args.serialport, timeout=args.serialtimeout) as jade:
                 # By default serial uses extended-replies
                 extended_replies = not args.noextendedreplies
                 info = get_version_info(jade)
@@ -540,10 +549,17 @@ if __name__ == '__main__':
                         info = get_version_info(jade)
                     ota(args, jade, info, extended_replies)
             else:
-                msg = 'Skipping BLE tests - not enabled on the hardware'
-                logger.warning(msg)
+                logger.warning('Skipping BLE OTA - not enabled on the hardware')
         else:
-            assert False  # Unreachable
+            # Download without a device
+            info = {'FEATURES': 'SB'}  # Assume production
+            if args.hwtarget:
+                info['BOARD_TYPE'] = {
+                    'jade': 'JADE',
+                    'jade1.1': 'JADE_V1.1',
+                    'jade2.0': 'JADE_V2',
+                    'jade2.0c': 'JADE_V2C'}.get(args.hwtarget)
+            ota(args, None, info, extended_replies=False)
 
     finally:
         if btagent:

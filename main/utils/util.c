@@ -67,6 +67,23 @@ bool is_potential_green_server_path(const uint32_t* path, const size_t path_len,
     return true;
 }
 
+char* strncasestr(const char* str, const char* word, size_t len)
+{
+    if (str && word && len) {
+        const size_t word_len = strlen(word);
+        const char* str_p = str;
+
+        while (*str_p != '\0' && len >= word_len) {
+            if (!strncasecmp(str_p, word, word_len)) {
+                return (char*)str_p;
+            }
+            ++str_p;
+            --len;
+        }
+    }
+    return NULL;
+}
+
 void split_text(const char* src, const size_t len, const size_t wordlen, char* output, const size_t output_len,
     size_t* num_words, size_t* written)
 {
@@ -173,6 +190,40 @@ bool bin_to_base32(const uint8_t* bin, const size_t bin_len, char* b32_str, cons
         --required_padding;
     }
     *out = '\0';
+    return true;
+}
+
+bool parse_uint64(const char* str, const size_t str_len, uint64_t* value_out)
+{
+    const uint64_t max_mul = 0xffffffffffffffffull / 10;
+    const uint64_t max_mod = 0xffffffffffffffffull % 10;
+    JADE_ASSERT(str && value_out);
+    if (!str_len || str_len > 20) {
+        return false; // Empty or too long to fit in uint64_t
+    }
+    uint64_t value = 0;
+    for (size_t i = 0; i < str_len; ++i) {
+        char ch = str[i];
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        ch -= '0';
+        if (value > max_mul || (value == max_mul && ch > max_mod)) {
+            return false; // Value too large
+        }
+        value = value * 10 + ch;
+    }
+    *value_out = value;
+    return true;
+}
+
+bool parse_uint32(const char* str, const size_t str_len, uint32_t* value_out)
+{
+    uint64_t value;
+    if (!parse_uint64(str, str_len, &value) || value > 0xffffffff) {
+        return false;
+    }
+    *value_out = value & 0xffffffff;
     return true;
 }
 #endif // AMALGAMATED_BUILD

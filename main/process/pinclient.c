@@ -122,7 +122,7 @@ static void send_http_request_reply(jade_process_t* process, const char* documen
     // Send reply message
     const size_t buflen = 1024 + cert_len;
     uint8_t* const buf = JADE_MALLOC(buflen);
-    jade_process_reply_to_message_result(process->ctx, buf, buflen, &pin_data, client_data_request_reply);
+    jade_process_reply_to_message_result(&process->ctx, buf, buflen, &pin_data, client_data_request_reply);
     free(buf);
 }
 
@@ -550,8 +550,7 @@ static bool get_pinserver_aeskey(jade_process_t* process, const uint8_t* pin, co
             JADE_LOGE("Failed to complete pinserver interaction");
             jade_process_reject_message(process, pir.errorcode, pir.message);
 
-            const char* message[] = { "Network or server", "error" };
-            await_error_activity(message, 2);
+            await_error_2("Network or server", "error");
             return false;
         }
 

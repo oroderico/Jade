@@ -55,9 +55,10 @@ struct _activity_holder_t {
 };
 
 typedef struct {
-    gui_view_node_t* node_to_repaint;
-    gui_activity_t* new_activity;
-    activity_holder_t* to_free;
+    gui_view_node_t* node_to_repaint; // Node to repaint (repaint request)
+    gui_activity_t* new_activity; // New activity to set
+    activity_holder_t* to_free; // List of activities to free
+    SemaphoreHandle_t done; // Optional: signaled after job completes
 } gui_task_job_t;
 
 // Main mutex used to synchronize all gui node and activity data
@@ -70,9 +71,16 @@ static gui_activity_t* current_activity = NULL;
 static activity_holder_t* existing_activities = NULL;
 
 // handle to the task running to update the gui
-static TaskHandle_t* gui_task_handle = NULL;
+static TaskHandle_t gui_task_handle = NULL;
 // queue for gui task to receive items to process (eg. repaint node, switch activities, etc.)
 static RingbufHandle_t gui_input_queue = NULL;
+// flag to indicate whether the gui task should stop. This is set
+// to true when the gui task starts, and is only ever set to false
+// by libjade (on shutdown).
+static volatile bool gui_task_should_run = false;
+// flag indicating the gui task is running. As above, this is only
+// set to false when libjade has exited the gui task.
+static volatile bool gui_task_running = false;
 
 // Click/select event (ie. which button counts as 'click'/select)
 // and which gui highlight colour is in use
@@ -109,6 +117,7 @@ struct {
 // Utils
 static void gui_task(void* args);
 static void repaint_node(gui_view_node_t* node);
+static struct view_node_button_data* node_get_button_data(gui_view_node_t* node);
 
 #ifdef CONFIG_LIBJADE
 #define statusbar_logo_end _binary_statusbar_large_bin_gz_end
@@ -143,7 +152,7 @@ static void make_status_bar(void)
 #if HOME_SCREEN_DEEP_STATUS_BAR
     // Make an hsplit for the logo on the left, and info on the right
     gui_view_node_t* hsplit;
-    gui_make_hsplit(&hsplit, GUI_SPLIT_RELATIVE, 2, 65, 35);
+    gui_make_hsplit(&hsplit, GUI_SPLIT_RELATIVE, 2, 60, 40);
     gui_set_padding(hsplit, GUI_MARGIN_ALL_DIFFERENT, 0, 2, 0, 2);
     gui_set_parent(hsplit, status_bar.root);
 
@@ -256,19 +265,16 @@ bool gui_get_flipped_orientation(void) { return gui_orientation_flipped; }
 
 bool gui_set_flipped_orientation(const bool flipped_orientation)
 {
-#if defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
-    const bool prev_orientation = gui_orientation_flipped;
-#endif
-    gui_orientation_flipped = display_flip_orientation(flipped_orientation);
-#if defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
-    if (gui_orientation_flipped != prev_orientation) {
+    const bool new_orientation = display_flip_orientation(flipped_orientation);
+    if (gui_orientation_flipped != new_orientation) {
+        gui_orientation_flipped = new_orientation;
+        // Redraw the virtual navbar buttons (if any) at their new position
         display_touch_navbar_redraw();
     }
-#endif
     return gui_orientation_flipped;
 }
 
-void gui_init(TaskHandle_t* gui_h)
+void gui_init(TaskHandle_t* gui_h, const bool create_event_loop)
 {
     // Create mutex semaphore
     gui_mutex = xSemaphoreCreateMutex();
@@ -284,9 +290,11 @@ void gui_init(TaskHandle_t* gui_h)
     // create a blank activity
     current_activity = gui_make_activity();
 
-    // create the default event loop used by btns
-    const esp_err_t rc = esp_event_loop_create_default();
-    JADE_ASSERT(rc == ESP_OK);
+    if (create_event_loop) {
+        // create the default event loop used by btns
+        const esp_err_t rc = esp_event_loop_create_default();
+        JADE_ASSERT(rc == ESP_OK);
+    }
 
     // Create main input queue (ringbuffer)
     gui_input_queue = xRingbufferCreate(32 * sizeof(gui_task_job_t), RINGBUF_TYPE_NOSPLIT);
@@ -298,17 +306,27 @@ void gui_init(TaskHandle_t* gui_h)
     // Create (high priority) gui task
     BaseType_t retval
         = xTaskCreatePinnedToCore(gui_task, "gui", 3 * 1024 + 256, NULL, JADE_TASK_PRIO_GUI, gui_h, JADE_CORE_GUI);
-    gui_task_handle = gui_h;
     JADE_ASSERT_MSG(retval == pdPASS, "Failed to create GUI task, xTaskCreatePinnedToCore() returned %d", retval);
 }
 
+void gui_stop(void)
+{
 #ifdef CONFIG_LIBJADE
+    // Only used by libjade
+    JADE_ASSERT(gui_task_handle);
+    JADE_ASSERT(gui_input_queue);
+    JADE_ASSERT(gui_mutex);
+
+    // Stop the gui task and wait for it to fully exit.
+    gui_task_should_run = false;
+    while (gui_task_running) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+#endif // CONFIG_LIBJADE
+}
+
 bool gui_initialized(void) { return gui_task_handle; }
-static bool gui_is_gui_task(void) { return true; }
-#else
-bool gui_initialized(void) { return gui_task_handle && *gui_task_handle; }
-static bool gui_is_gui_task(void) { return gui_task_handle && xTaskGetCurrentTaskHandle() == *gui_task_handle; }
-#endif // ndef CONFIG_LIBJADE
+bool gui_is_gui_task(void) { return gui_task_handle && xTaskGetCurrentTaskHandle() == gui_task_handle; }
 
 // Is this kind of node selectable?
 static inline bool is_kind_selectable(enum view_node_kind kind) { return kind == BUTTON; }
@@ -354,7 +372,7 @@ void gui_set_active(gui_view_node_t* node, const bool value)
 
     // Set passed node to active/inactive and redraw
     set_tree_active(node, value);
-    if (!node->render_data.is_first_time) {
+    if (!node->is_first_render) {
         gui_repaint(node); // Repaint since screen is "live"
     }
 }
@@ -549,10 +567,15 @@ static void select_action(gui_activity_t* activity)
     JADE_ASSERT(activity);
 
     selectable_t* const current = activity->selectables;
-    if (current && current->node->is_selected && current->node->button->click_event_id != GUI_BUTTON_EVENT_NONE) {
+    if (!current || !current->node->is_selected || !is_kind_selectable(current->node->kind)) {
+        return;
+    }
+    // Must be a button, as only buttons are selectable
+    struct view_node_button_data* data = node_get_button_data(current->node);
+    if (data->click_event_id != GUI_BUTTON_EVENT_NONE) {
         JADE_ASSERT(current->node->activity == activity);
-        const esp_err_t rc = esp_event_post(GUI_BUTTON_EVENT, current->node->button->click_event_id,
-            &current->node->button->args, sizeof(void*), 100 / portTICK_PERIOD_MS);
+        const esp_err_t rc = esp_event_post(
+            GUI_BUTTON_EVENT, data->click_event_id, &data->args, sizeof(void*), 100 / portTICK_PERIOD_MS);
         JADE_ASSERT(rc == ESP_OK);
     }
 }
@@ -583,7 +606,7 @@ void gui_activity_set_active_selection(gui_activity_t* activity, gui_view_node_t
     // 'selected' should have been seen in 'nodes'
     JADE_ASSERT(set_selected);
 
-    if (activity->root_node && !activity->root_node->render_data.is_first_time) {
+    if (activity->root_node && !activity->root_node->is_first_render) {
         // Screen is "live": repaint the whole activity
         gui_repaint(activity->root_node);
     }
@@ -674,24 +697,18 @@ void gui_make_activity_ex(gui_activity_t** ppact, const bool has_status_bar, con
     JADE_INIT_OUT_PPTR(ppact);
     JADE_ASSERT(!title || has_status_bar);
 
+    activity_holder_t* holder = NULL;
+    gui_activity_t* activity = NULL;
+
     if (managed) {
-        // Managed activity - add to activities list
-        activity_holder_t* holder = JADE_CALLOC(1, sizeof(activity_holder_t));
-
-        // Add to the stack of existing activities
-        JADE_SEMAPHORE_TAKE(gui_mutex);
-        holder->next = existing_activities;
-        existing_activities = holder;
-        JADE_SEMAPHORE_GIVE(gui_mutex);
-
-        // Return the activity from within this holder
-        *ppact = &holder->activity;
+        // Managed activity - create a holder and return its activity
+        holder = JADE_CALLOC(1, sizeof(activity_holder_t));
+        activity = &holder->activity;
     } else {
         // Unmanaged - just create the activity to return
-        *ppact = JADE_CALLOC(1, sizeof(gui_activity_t));
-        JADE_LOGW("Created unmanaged gui activity at %p", *ppact);
+        activity = JADE_CALLOC(1, sizeof(gui_activity_t));
+        JADE_LOGW("Created unmanaged gui activity at %p", activity);
     }
-    gui_activity_t* const activity = *ppact;
 
     // Initialise any non-NULL activity fields
     activity->win = GUI_DISPLAY_WINDOW;
@@ -706,13 +723,20 @@ void gui_make_activity_ex(gui_activity_t** ppact, const bool has_status_bar, con
         JADE_ASSERT(activity->title);
     }
 
-    gui_view_node_t* bg;
-    gui_make_fill(&bg, TFT_BLACK, FILL_PLAIN, NULL);
-    activity->root_node = bg;
+    gui_make_fill(&activity->root_node, TFT_BLACK, FILL_PLAIN, NULL);
     activity->root_node->activity = activity;
 #ifdef CONFIG_UI_WRAP_ALL_MENUS
     activity->selectables_wrap = true; // allow the button cursor to wrap
 #endif
+
+    if (holder) {
+        // Managed activity - add to the stack of existing activities
+        JADE_SEMAPHORE_TAKE(gui_mutex);
+        holder->next = existing_activities;
+        existing_activities = holder;
+        JADE_SEMAPHORE_GIVE(gui_mutex);
+    }
+    *ppact = activity; // return to the caller
 }
 
 // Create a new/initialised 'managed' activity without a status bar,
@@ -820,13 +844,13 @@ static void switch_activity_callback(void* handler_arg, esp_event_base_t base, i
 
 static void connect_button_activity(gui_view_node_t* node, gui_activity_t* activity)
 {
-    JADE_ASSERT(node);
+    JADE_ASSERT(node && node->kind == BUTTON);
     JADE_ASSERT(node->activity);
-    JADE_ASSERT(node->kind == BUTTON);
     JADE_ASSERT(activity);
 
+    struct view_node_button_data* data = node_get_button_data(node);
     gui_activity_register_event(
-        node->activity, GUI_BUTTON_EVENT, node->button->click_event_id, switch_activity_callback, activity);
+        node->activity, GUI_BUTTON_EVENT, data->click_event_id, switch_activity_callback, activity);
 }
 
 // Link activities eg. by prev/next buttons
@@ -926,47 +950,32 @@ void gui_set_parent(gui_view_node_t* child, gui_view_node_t* parent)
     }
 }
 
-// Free a view_node
-void free_view_node(gui_view_node_t* node)
-{
-    JADE_ASSERT(node);
-
-    // call the destructor if it's set
-    if (node->free_callback) {
-        node->free_callback(node->data);
+// Defines a struct and helpers for allocating view nodes with their type-specific data
+#define DEFINE_GUI_NODE_TYPE(typ)                                                                                      \
+    typedef struct {                                                                                                   \
+        gui_view_node_t n;                                                                                             \
+        struct view_node_##typ##_data d;                                                                               \
+    } gui_##typ##_alloc_t;                                                                                             \
+    static gui_view_node_t* gui_alloc_##typ(void) { return JADE_CALLOC(1, sizeof(gui_##typ##_alloc_t)); }              \
+    static struct view_node_##typ##_data* node_get_##typ##_data(gui_view_node_t* node)                                 \
+    {                                                                                                                  \
+        return &((gui_##typ##_alloc_t*)node)->d;                                                                       \
     }
 
-    // free any borders
-    free(node->borders);
-
-    // free the extra data struct
-    free(node->data);
-
-    if (node->child) {
-        free_view_node(node->child);
-    }
-
-    if (node->sibling) {
-        free_view_node(node->sibling);
-    }
-
-    free(node);
-}
+DEFINE_GUI_NODE_TYPE(split)
+DEFINE_GUI_NODE_TYPE(text)
+DEFINE_GUI_NODE_TYPE(fill)
+DEFINE_GUI_NODE_TYPE(button)
+DEFINE_GUI_NODE_TYPE(icon)
+DEFINE_GUI_NODE_TYPE(picture)
+DEFINE_GUI_NODE_TYPE(qrguide)
 
 // destructor for {v,h}split nodes
-static void free_view_node_split_data(void* vdata)
-{
-    JADE_ASSERT(vdata);
-    struct view_node_split_data* data = vdata;
-    free(data->values);
-}
+static void free_view_node_split_data(struct view_node_split_data* data) { free(data->values); }
 
 // destructor for text nodes
-static void free_view_node_text_data(void* vdata)
+static void free_view_node_text_data(struct view_node_text_data* data)
 {
-    JADE_ASSERT(vdata);
-    struct view_node_text_data* data = vdata;
-
     // free the char* that we allocated
     // Use wally_free_string in case the text is sensitive
     wally_free_string(data->text);
@@ -983,11 +992,8 @@ static void free_view_node_text_data(void* vdata)
 }
 
 // destructor for text nodes
-static void free_view_node_icon_data(void* vdata)
+static void free_view_node_icon_data(struct view_node_icon_data* data)
 {
-    JADE_ASSERT(vdata);
-    struct view_node_icon_data* data = vdata;
-
     // free the animation struct if present
     if (data->animation) {
         // NOTE: we owned the animation frames
@@ -1001,58 +1007,93 @@ static void free_view_node_icon_data(void* vdata)
 }
 
 // destructor for picture nodes
-static void free_view_node_picture_data(void* vdata)
+static void free_view_node_picture_data(struct view_node_picture_data* data)
 {
-    JADE_ASSERT(vdata);
-    struct view_node_picture_data* data = vdata;
-    JADE_ASSERT(data->picture);
-    JADE_ASSERT(data->picture->data_8);
-    free((void*)data->picture->data_8);
-    free((void*)data->picture);
+    if (data->picture) {
+        if (data->picture->data_8) {
+            free(data->picture->data_8);
+        }
+        free((void*)data->picture);
+    }
+}
+
+// Free a view_node
+void free_view_node(gui_view_node_t* node)
+{
+    JADE_ASSERT(node);
+
+    // call the destructor
+    switch (node->kind) {
+    case HSPLIT:
+    case VSPLIT:
+        free_view_node_split_data(node_get_split_data(node));
+        break;
+    case TEXT:
+        free_view_node_text_data(node_get_text_data(node));
+        break;
+    case ICON:
+        free_view_node_icon_data(node_get_icon_data(node));
+        break;
+    case PICTURE:
+        free_view_node_picture_data(node_get_picture_data(node));
+        break;
+    case FILL:
+    case BUTTON:
+    case QRGUIDE:
+    case STATIC_PICTURE:
+        /* No-op */
+        break;
+    }
+
+    // free any borders
+    free(node->borders);
+
+    if (node->child) {
+        free_view_node(node->child);
+    }
+
+    if (node->sibling) {
+        free_view_node(node->sibling);
+    }
+
+    free(node);
 }
 
 // make the underlying view node, common across all the gui_make_* functions
-static void make_view_node(gui_view_node_t** ptr, enum view_node_kind kind, void* data, free_callback_t free_callback)
+static void make_view_node(gui_view_node_t* node, enum view_node_kind kind)
 {
-    JADE_INIT_OUT_PPTR(ptr);
-
-    *ptr = JADE_CALLOC(1, sizeof(gui_view_node_t));
-
-    (*ptr)->render_data.is_first_time = true;
-
-    (*ptr)->is_selected = false;
-    // by default active
-    (*ptr)->is_active = true;
-
-    (*ptr)->kind = kind;
-    (*ptr)->data = data;
-    (*ptr)->free_callback = free_callback;
+    node->is_first_render = true;
+    node->is_selected = false;
+    node->is_active = true; // active by default
+    node->kind = kind;
 }
 
 // Generic function to make a {v,h}split node
 static void make_split_node(
-    gui_view_node_t** ptr, enum view_node_kind split_kind, enum gui_split_type kind, uint8_t parts, va_list values)
+    gui_view_node_t** ptr, enum view_node_kind split_kind, enum gui_split_type kind, int parts, va_list values)
 {
     JADE_INIT_OUT_PPTR(ptr);
     JADE_ASSERT(split_kind == HSPLIT || split_kind == VSPLIT);
+    JADE_ASSERT(parts > 0 && parts <= UINT8_MAX);
 
-    struct view_node_split_data* data = JADE_CALLOC(1, sizeof(struct view_node_split_data));
+    *ptr = gui_alloc_split();
+    make_view_node(*ptr, split_kind);
+    struct view_node_split_data* data = node_get_split_data(*ptr);
 
     data->kind = kind;
-    data->parts = parts;
+    data->parts = (uint8_t)parts;
 
     // copy the values
     data->values = JADE_CALLOC(1, sizeof(uint16_t) * parts);
 
     for (uint8_t i = 0; i < parts; ++i) {
-        data->values[i] = (uint16_t)va_arg(values, uint32_t);
+        const int value = va_arg(values, int);
+        JADE_ASSERT(value >= 0 && value <= UINT16_MAX);
+        data->values[i] = (uint16_t)value;
     };
-
-    // ... and also set a destructor to free them later
-    make_view_node(ptr, split_kind, data, free_view_node_split_data);
 }
 
-void gui_make_hsplit(gui_view_node_t** ptr, enum gui_split_type kind, uint8_t parts, ...)
+void gui_make_hsplit(gui_view_node_t** ptr, enum gui_split_type kind, int parts, ...)
 {
     JADE_INIT_OUT_PPTR(ptr);
 
@@ -1062,7 +1103,7 @@ void gui_make_hsplit(gui_view_node_t** ptr, enum gui_split_type kind, uint8_t pa
     va_end(args);
 }
 
-void gui_make_vsplit(gui_view_node_t** ptr, enum gui_split_type kind, uint8_t parts, ...)
+void gui_make_vsplit(gui_view_node_t** ptr, enum gui_split_type kind, int parts, ...)
 {
     JADE_INIT_OUT_PPTR(ptr);
 
@@ -1077,7 +1118,9 @@ void gui_make_button(
 {
     JADE_INIT_OUT_PPTR(ptr);
 
-    struct view_node_button_data* data = JADE_CALLOC(1, sizeof(struct view_node_button_data));
+    *ptr = gui_alloc_button();
+    make_view_node(*ptr, BUTTON);
+    struct view_node_button_data* data = node_get_button_data(*ptr);
 
     // If the un-selected colour is the same as the selected colour, it implies
     // the button is transparent when not selected, so we can skip filling the content.
@@ -1088,22 +1131,21 @@ void gui_make_button(
 
     data->click_event_id = event_id;
     data->args = args;
-
-    make_view_node(ptr, BUTTON, data, NULL);
 }
 
 void gui_make_fill(gui_view_node_t** ptr, color_t color, enum fill_node_kind fill_type, gui_view_node_t* parent)
 {
     JADE_INIT_OUT_PPTR(ptr);
 
-    struct view_node_fill_data* data = JADE_CALLOC(1, sizeof(struct view_node_fill_data));
+    *ptr = gui_alloc_fill();
+    make_view_node(*ptr, FILL);
+    struct view_node_fill_data* data = node_get_fill_data(*ptr);
 
     // by default same color
     data->color = color;
     data->selected_color = color;
     data->fill_type = fill_type;
 
-    make_view_node(ptr, FILL, data, NULL);
     if (parent) {
         gui_set_parent(*ptr, parent);
     }
@@ -1119,7 +1161,9 @@ void gui_make_text_font(gui_view_node_t** ptr, const char* text, color_t color, 
     JADE_INIT_OUT_PPTR(ptr);
     JADE_ASSERT(text);
 
-    struct view_node_text_data* data = JADE_CALLOC(1, sizeof(struct view_node_text_data));
+    *ptr = gui_alloc_text();
+    make_view_node(*ptr, TEXT);
+    struct view_node_text_data* data = node_get_text_data(*ptr);
 
     // max chars limited to GUI_MAX_TEXT_LENGTH
     const size_t len = min_u16(GUI_MAX_TEXT_LENGTH, strlen(text) + 1);
@@ -1143,9 +1187,6 @@ void gui_make_text_font(gui_view_node_t** ptr, const char* text, color_t color, 
 
     // without noise
     data->noise = NULL;
-
-    // also set free_view_node_text_data as destructor to free data->text
-    make_view_node(ptr, TEXT, data, free_view_node_text_data);
 }
 
 void gui_make_icon(gui_view_node_t** ptr, const Icon* icon, color_t color, const color_t* bg_color)
@@ -1153,7 +1194,9 @@ void gui_make_icon(gui_view_node_t** ptr, const Icon* icon, color_t color, const
     JADE_INIT_OUT_PPTR(ptr);
     JADE_ASSERT(icon);
 
-    struct view_node_icon_data* data = JADE_CALLOC(1, sizeof(struct view_node_icon_data));
+    *ptr = gui_alloc_icon();
+    make_view_node(*ptr, ICON);
+    struct view_node_icon_data* data = node_get_icon_data(*ptr);
 
     data->icon = *icon;
 
@@ -1171,31 +1214,29 @@ void gui_make_icon(gui_view_node_t** ptr, const Icon* icon, color_t color, const
     data->halign = GUI_ALIGN_LEFT;
     data->valign = GUI_ALIGN_TOP;
     data->icon_type = ICON_PLAIN;
-
-    // also set free_view_node_icon_data as destructor to free any animation data
-    make_view_node(ptr, ICON, data, free_view_node_icon_data);
 }
 
 void gui_make_qrguide(gui_view_node_t** ptr, color_t color)
 {
     JADE_INIT_OUT_PPTR(ptr);
 
-    struct view_node_qrguide_data* data = JADE_CALLOC(1, sizeof(struct view_node_qrguide_data));
+    *ptr = gui_alloc_qrguide();
+    make_view_node(*ptr, QRGUIDE);
+    struct view_node_qrguide_data* data = node_get_qrguide_data(*ptr);
 
     data->color = color;
-
-    make_view_node(ptr, QRGUIDE, data, NULL);
 }
 
 static bool icon_animation_frame_callback(gui_view_node_t* node, void* extra_args)
 {
     // no node, invalid node, not yet rendered...
-    if (!node || node->kind != ICON || node->render_data.is_first_time) {
+    if (!node || node->kind != ICON || node->is_first_render) {
         return false;
     }
 
     // animation not applicable
-    struct view_node_icon_animation_data* animation_data = node->icon->animation;
+    struct view_node_icon_data* data = node_get_icon_data(node);
+    struct view_node_icon_animation_data* animation_data = data->animation;
     if (!animation_data || !animation_data->frames_per_icon || animation_data->num_icons <= 1) {
         return false;
     }
@@ -1208,7 +1249,7 @@ static bool icon_animation_frame_callback(gui_view_node_t* node, void* extra_arg
 
     // Update main icon
     animation_data->current_icon = (animation_data->current_icon + 1) % animation_data->num_icons;
-    node->icon->icon = animation_data->icons[animation_data->current_icon];
+    data->icon = animation_data->icons[animation_data->current_icon];
 
     // Reset frame counter
     animation_data->current_frame = animation_data->frames_per_icon;
@@ -1217,58 +1258,58 @@ static bool icon_animation_frame_callback(gui_view_node_t* node, void* extra_arg
     return true;
 }
 
-// NOTE: takes ownership of icons
-void gui_set_icon_animation(gui_view_node_t* node, Icon* icons, const size_t num_icons, const size_t frames_per_icon)
+void gui_make_icon_animation(gui_view_node_t** ptr, gui_view_node_t* parent, color_t color, const color_t* bg_color,
+    Icon* icons, const size_t num_icons, const size_t frames_per_icon)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == ICON);
-    JADE_ASSERT(icons);
     JADE_ASSERT(num_icons);
     JADE_ASSERT(frames_per_icon || num_icons == 1);
 
+    gui_make_icon(ptr, icons, color, bg_color);
+
     struct view_node_icon_animation_data* animation_data = JADE_CALLOC(1, sizeof(struct view_node_icon_animation_data));
 
-    animation_data->icons = icons;
+    animation_data->icons = icons; // NOTE: takes ownership of icons
     animation_data->num_icons = num_icons;
     animation_data->current_icon = 0;
 
     animation_data->frames_per_icon = frames_per_icon;
     animation_data->current_frame = 0;
 
-    node->icon->animation = animation_data;
+    node_get_icon_data(*ptr)->animation = animation_data;
+
+    gui_set_parent(*ptr, parent);
 
     // If there are multiple icons, push this to the list of updatable elements so
     // that the image gets periodically updated.
     if (num_icons > 1) {
-        push_updatable(node, icon_animation_frame_callback, NULL);
+        push_updatable(*ptr, icon_animation_frame_callback, NULL);
     }
 }
 
 void gui_set_icon_to_qr(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    node->icon->icon_type = ICON_QR;
+    JADE_ASSERT(node && node->kind == ICON);
+    node_get_icon_data(node)->icon_type = ICON_QR;
 }
 
 void gui_make_picture(gui_view_node_t** ptr, const Picture* picture)
 {
     JADE_INIT_OUT_PPTR(ptr);
-    // picture optional at creation time
+    // picture is optional. if not provided, the caller is responsible for
+    // freeing any picture data set later.
 
-    struct view_node_picture_data* data = JADE_CALLOC(1, sizeof(struct view_node_picture_data));
+    *ptr = gui_alloc_picture();
+    make_view_node(*ptr, picture ? PICTURE : STATIC_PICTURE);
+    struct view_node_picture_data* data = node_get_picture_data(*ptr);
 
     data->picture = picture;
 
     // top-left by default
     data->halign = GUI_ALIGN_LEFT;
     data->valign = GUI_ALIGN_TOP;
-
-    // if the picture node is created without providing a picture then the caller
-    // is responsable for freeing the picture data
-    make_view_node(ptr, PICTURE, data, picture ? free_view_node_picture_data : NULL);
 }
 
-static void set_vals_with_varargs(gui_margin_t* margins, const uint8_t sides, va_list args)
+static void set_vals_with_varargs(gui_margin_t* margins, const int sides, va_list args)
 {
     JADE_ASSERT(margins);
 
@@ -1278,7 +1319,7 @@ static void set_vals_with_varargs(gui_margin_t* margins, const uint8_t sides, va
     case GUI_MARGIN_ALL_EQUAL:
         // we only pop one value
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->top = val;
         margins->right = val;
         margins->bottom = val;
@@ -1288,12 +1329,12 @@ static void set_vals_with_varargs(gui_margin_t* margins, const uint8_t sides, va
     case GUI_MARGIN_TWO_VALUES:
         // two values, top/bottom and right/left
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->top = val;
         margins->bottom = val;
 
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->right = val;
         margins->left = val;
         break;
@@ -1301,24 +1342,24 @@ static void set_vals_with_varargs(gui_margin_t* margins, const uint8_t sides, va
     case GUI_MARGIN_ALL_DIFFERENT:
         // four different values
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->top = val;
 
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->right = val;
 
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->bottom = val;
 
         val = va_arg(args, int);
-        JADE_ASSERT(val <= UINT8_MAX);
+        JADE_ASSERT(val >= 0 && val <= UINT8_MAX);
         margins->left = val;
         break;
 
     default:
-        JADE_ASSERT_MSG(false, "set_vals_with_varargs() - unexpected 'sides' value: %u", sides);
+        JADE_ASSERT_MSG(false, "set_vals_with_varargs() - unexpected 'sides' value: %i", sides);
     }
 }
 
@@ -1334,11 +1375,11 @@ static void calc_render_data(gui_view_node_t* node)
     JADE_ASSERT(node);
 
     // constraints haven't been set yet, we can't do much
-    if (node->render_data.is_first_time) {
+    if (node->is_first_render) {
         return;
     }
 
-    dispWin_t constraints = node->render_data.original_constraints;
+    dispWin_t constraints = node->constraints;
 
     // margins affect borders and all contents
     constraints.y1 += node->margins.top;
@@ -1361,10 +1402,10 @@ static void calc_render_data(gui_view_node_t* node)
     constraints.x1 += node->padding.left;
 
     // cache these padded constraints
-    node->render_data.padded_constraints = constraints;
+    node->padded_constraints = constraints;
 }
 
-void gui_set_margins(gui_view_node_t* node, uint32_t sides, ...)
+void gui_set_margins(gui_view_node_t* node, int sides, ...)
 {
     JADE_ASSERT(node);
 
@@ -1377,7 +1418,7 @@ void gui_set_margins(gui_view_node_t* node, uint32_t sides, ...)
     calc_render_data(node);
 }
 
-void gui_set_padding(gui_view_node_t* node, uint32_t sides, ...)
+void gui_set_padding(gui_view_node_t* node, int sides, ...)
 {
     JADE_ASSERT(node);
 
@@ -1428,22 +1469,26 @@ void gui_set_colors(gui_view_node_t* node, color_t color, color_t selected_color
     JADE_ASSERT(node);
 
     switch (node->kind) {
-    case TEXT:
-        node->text->color = color;
-        node->text->selected_color = selected_color;
-        break;
-    case FILL:
-        node->fill->color = color;
-        node->fill->selected_color = selected_color;
-        break;
-    case BUTTON:
-        node->button->color = color;
-        node->button->selected_color = selected_color;
-        break;
-    case ICON:
-        node->icon->color = color;
-        node->icon->selected_color = selected_color;
-        break;
+    case TEXT: {
+        struct view_node_text_data* data = node_get_text_data(node);
+        data->color = color;
+        data->selected_color = selected_color;
+    } break;
+    case FILL: {
+        struct view_node_fill_data* data = node_get_fill_data(node);
+        data->color = color;
+        data->selected_color = selected_color;
+    } break;
+    case BUTTON: {
+        struct view_node_button_data* data = node_get_button_data(node);
+        data->color = color;
+        data->selected_color = selected_color;
+    } break;
+    case ICON: {
+        struct view_node_icon_data* data = node_get_icon_data(node);
+        data->color = color;
+        data->selected_color = selected_color;
+    } break;
     default:
         JADE_ASSERT_MSG(false, "gui_set_colors() - Unexpected node kind: %u", node->kind);
     }
@@ -1455,35 +1500,34 @@ void gui_set_align(gui_view_node_t* node, enum gui_horizontal_align halign, enum
 {
     JADE_ASSERT(node);
 
-    enum gui_horizontal_align* halign_ptr;
-    enum gui_vertical_align* valign_ptr;
     switch (node->kind) {
-    case TEXT:
-        halign_ptr = &node->text->halign;
-        valign_ptr = &node->text->valign;
-        break;
-    case ICON:
-        halign_ptr = &node->icon->halign;
-        valign_ptr = &node->icon->valign;
-        break;
+    case TEXT: {
+        struct view_node_text_data* data = node_get_text_data(node);
+        data->halign = halign;
+        data->valign = valign;
+    } break;
+    case ICON: {
+        struct view_node_icon_data* data = node_get_icon_data(node);
+        data->halign = halign;
+        data->valign = valign;
+    } break;
     case PICTURE:
-        halign_ptr = &node->picture->halign;
-        valign_ptr = &node->picture->valign;
-        break;
+    case STATIC_PICTURE: {
+        struct view_node_picture_data* data = node_get_picture_data(node);
+        data->halign = halign;
+        data->valign = valign;
+    } break;
 
     default:
         JADE_ASSERT_MSG(false, "gui_set_align() - Unexpected node kind: %u", node->kind);
     }
-
-    *halign_ptr = halign;
-    *valign_ptr = valign;
 }
 
 static inline bool can_text_fit(const char* text, uint32_t font, dispWin_t cs)
 {
     JADE_ASSERT(text);
 
-    display_set_font(font, NULL); // measure relative to this font
+    display_set_font(font); // measure relative to this font
     return display_get_string_width(text) <= cs.x2 - cs.x1;
 }
 
@@ -1491,76 +1535,81 @@ static inline bool can_text_fit(const char* text, uint32_t font, dispWin_t cs)
 static bool text_scroll_frame_callback(gui_view_node_t* node, void* extra_args)
 {
     // no node, invalid node, not yet rendered...
-    if (!node || node->kind != TEXT || node->render_data.is_first_time) {
+    if (!node || node->kind != TEXT || node->is_first_render) {
         return false;
+    }
+
+    const struct view_node_text_data* data = node_get_text_data(node);
+    if (!data->text) {
+        return false; // Empty string
     }
 
     // check if scrolling is only enabled when the item is selected, and node
     // NOT currently selected - if so redraw at 'start' position
-    if (!node->is_selected && node->text->scroll->only_when_selected) {
+    if (!node->is_selected && data->scroll->only_when_selected) {
         // if text already at start position, just exit, nothing to do
-        if (!node->text->scroll->going_back && !node->text->scroll->offset) {
+        if (!data->scroll->going_back && !data->scroll->offset) {
             return false;
         }
 
         // set text to start position and return true so item repainted
-        node->text->scroll->prev_offset = node->text->scroll->offset;
-        node->text->scroll->going_back = false;
-        node->text->scroll->offset = 0;
-        node->text->scroll->wait = GUI_SCROLL_WAIT_END;
+        data->scroll->prev_offset = data->scroll->offset;
+        data->scroll->going_back = false;
+        data->scroll->offset = 0;
+        data->scroll->wait = GUI_SCROLL_WAIT_END;
         return true;
     }
 
     // do nothing this frame
-    if (node->text->scroll->wait > 0) {
-        node->text->scroll->wait--;
+    if (data->scroll->wait > 0) {
+        data->scroll->wait--;
         return false;
     }
 
     // the string can fit entirely in its box, no need to scroll. we might need to reset stuff though, if the text has
     // changed
-    if (can_text_fit(node->render_data.resolved_text, node->text->font, node->render_data.padded_constraints)) {
-        const size_t old_offset = node->text->scroll->offset;
+    if (can_text_fit(data->text, data->font, node->padded_constraints)) {
+        const size_t old_offset = data->scroll->offset;
 
         // set offset to zero and wait a little before checking again
-        node->text->scroll->going_back = false;
-        node->text->scroll->offset = 0;
-        node->text->scroll->wait = GUI_SCROLL_WAIT_END;
+        data->scroll->going_back = false;
+        data->scroll->offset = 0;
+        data->scroll->wait = GUI_SCROLL_WAIT_END;
 
         // only repaint on screen if the offset was not zero
         return old_offset != 0;
     }
 
     // update the offset based on the direction
-    node->text->scroll->prev_offset = node->text->scroll->offset;
-    if (node->text->scroll->going_back) {
-        JADE_ASSERT(node->text->scroll->offset > 0); // we should "catch" this before and set going_back to false
-        node->text->scroll->offset--;
-    } else if (node->text->scroll->offset
-        <= node->render_data.resolved_text_length - 1) { // never go out of bounds with the offset
-        node->text->scroll->offset++;
+    const size_t text_length = strlen(data->text);
+    data->scroll->prev_offset = data->scroll->offset;
+    if (data->scroll->going_back) {
+        JADE_ASSERT(data->scroll->offset > 0); // we should "catch" this before and set going_back to false
+        data->scroll->offset--;
+    } else if (data->scroll->offset <= text_length - 1) {
+        // never go out of bounds with the offset
+        data->scroll->offset++;
     }
 
     // since we scrolled this frame, wait some frames before doing the next one
-    node->text->scroll->wait = GUI_SCROLL_WAIT_FRAME;
+    data->scroll->wait = GUI_SCROLL_WAIT_FRAME;
 
     // check if we are done going forward
-    if (!node->text->scroll->going_back) {
-        bool can_fit = can_text_fit(node->render_data.resolved_text + node->text->scroll->offset, node->text->font,
-            node->render_data.padded_constraints);
-        bool end_of_string = node->text->scroll->offset == node->render_data.resolved_text_length - 1;
+    if (!data->scroll->going_back) {
+        bool can_fit = can_text_fit(data->text + data->scroll->offset, data->font, node->padded_constraints);
+        bool end_of_string = data->scroll->offset == text_length - 1;
 
         // done, let's go back. we can fit OR we reached the end of the string
         if (can_fit || end_of_string) {
-            node->text->scroll->going_back = true;
-            node->text->scroll->wait = GUI_SCROLL_WAIT_END;
+            data->scroll->going_back = true;
+            data->scroll->wait = GUI_SCROLL_WAIT_END;
         }
     }
 
     // start again
-    if (node->text->scroll->going_back && node->text->scroll->offset == 0) {
-        node->text->scroll->going_back = false;
-        node->text->scroll->wait = GUI_SCROLL_WAIT_END;
+    if (data->scroll->going_back && data->scroll->offset == 0) {
+        data->scroll->going_back = false;
+        data->scroll->wait = GUI_SCROLL_WAIT_END;
     }
 
     // repaint on screen
@@ -1569,10 +1618,11 @@ static bool text_scroll_frame_callback(gui_view_node_t* node, void* extra_args)
 
 void gui_set_text_scroll(gui_view_node_t* node, color_t background_color)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
-    JADE_ASSERT(!node->text->scroll); // the node is not already scrolling...
-    JADE_ASSERT(!node->text->noise); // if the node has noise added we will not allow scrolling ...
+    JADE_ASSERT(node && node->kind == TEXT);
+
+    struct view_node_text_data* data = node_get_text_data(node);
+    JADE_ASSERT(!data->scroll); // the node is not already scrolling...
+    JADE_ASSERT(!data->noise); // if the node has noise added we will not allow scrolling ...
 
     struct view_node_text_scroll_data* scroll_data = JADE_CALLOC(1, sizeof(struct view_node_text_scroll_data));
 
@@ -1582,7 +1632,7 @@ void gui_set_text_scroll(gui_view_node_t* node, color_t background_color)
     scroll_data->background_color = background_color;
     scroll_data->selected_background_color = background_color;
 
-    node->text->scroll = scroll_data;
+    data->scroll = scroll_data;
 
     // now push this to the list of updatable elements so that it gets updated every frame
     push_updatable(node, text_scroll_frame_callback, NULL);
@@ -1591,81 +1641,63 @@ void gui_set_text_scroll(gui_view_node_t* node, color_t background_color)
 void gui_set_text_scroll_selected(
     gui_view_node_t* node, bool only_when_selected, color_t background_color, color_t selected_background_color)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
+    JADE_ASSERT(node && node->kind == TEXT);
 
     gui_set_text_scroll(node, background_color);
 
-    node->text->scroll->only_when_selected = only_when_selected;
-    node->text->scroll->background_color = background_color;
-    node->text->scroll->selected_background_color = selected_background_color;
+    struct view_node_text_data* data = node_get_text_data(node);
+    data->scroll->only_when_selected = only_when_selected;
+    data->scroll->background_color = background_color;
+    data->scroll->selected_background_color = selected_background_color;
 }
 
 void gui_set_text_noise(gui_view_node_t* node, color_t background_color)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
-    JADE_ASSERT(!node->text->scroll); // if the node is scrolling we will not allow adding noise ...
+    JADE_ASSERT(node && node->kind == TEXT);
+    struct view_node_text_data* data = node_get_text_data(node);
+    JADE_ASSERT(!data->scroll); // if the node is scrolling we will not allow adding noise ...
 
     struct view_node_text_noise_data* noise_data = JADE_MALLOC(sizeof(struct view_node_text_noise_data));
     noise_data->background_color = background_color;
 
-    node->text->noise = noise_data;
+    data->noise = noise_data;
 }
 
 void gui_set_text_font(gui_view_node_t* node, uint32_t font)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
+    JADE_ASSERT(node && node->kind == TEXT);
 
     // TODO: "validate" the font?
-    node->text->font = font;
+    struct view_node_text_data* data = node_get_text_data(node);
+    data->font = font;
 }
 
 void gui_set_text_default_font(gui_view_node_t* node) { gui_set_text_font(node, GUI_DEFAULT_FONT); }
-
-// resolve translated strings/etc
-static void resolve_text(gui_view_node_t* node)
-{
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
-
-    const char* resolved_text = NULL;
-    if (strncmp("@string/", node->text->text, 8) == 0) {
-        const char* key = node->text->text + 8;
-
-        const locale_multilang_string_t* str = locale_get(key);
-        if (str) {
-            resolved_text = locale_lang_with_fallback(str, GUI_LOCALE);
-        }
-    }
-
-    // set the resolved text. if we weren't able to resolve it (not a ref, not translated, missing for this lang, etc)
-    // we just use the original value
-    node->render_data.resolved_text = resolved_text ? resolved_text : node->text->text;
-    node->render_data.resolved_text_length = strlen(node->render_data.resolved_text);
-}
 
 // Helper function to just update the text node internal text data - does not repaint,
 // so several nodes can be updated then a single repaint issued - eg. the status bar
 static void update_text_node_text(gui_view_node_t* node, const char* text)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
+    JADE_ASSERT(node && node->kind == TEXT);
     JADE_ASSERT(text);
 
-    // max chars limited to GUI_MAX_TEXT_LENGTH
-    const size_t len = min_u16(GUI_MAX_TEXT_LENGTH, strlen(text) + 1);
-    char* new_text = JADE_MALLOC(len);
-    const int ret = snprintf(new_text, len, "%s", text);
-    JADE_ASSERT(ret >= 0); // truncation is acceptable here, as is empty string
+    struct view_node_text_data* data = node_get_text_data(node);
+    const size_t text_length = strlen(text);
+    const size_t old_length = strlen(data->text);
+    if (text_length <= old_length) {
+        // Overwrite the existing string in place
+        wally_bzero(data->text, old_length);
+        memcpy(data->text, text, text_length);
+        return;
+    }
 
     // free the old text node and replace with the new pointer
-    free(node->text->text);
-    node->text->text = new_text;
-
-    // resolve text references
-    resolve_text(node);
+    wally_free_string(data->text);
+    // max chars limited to GUI_MAX_TEXT_LENGTH
+    const size_t len = min_u16(GUI_MAX_TEXT_LENGTH, text_length + 1);
+    data->text = JADE_MALLOC(len);
+    const int ret = snprintf(data->text, len, "%s", text);
+    JADE_ASSERT(ret >= 0); // truncation is acceptable here, as is empty string
 }
 
 // Takes the gui_mutex, updates the text node, and then only draws the
@@ -1698,15 +1730,15 @@ void gui_update_text(gui_view_node_t* node, const char* text)
 // updated item if it is part of the 'current activity'.
 void gui_update_icon(gui_view_node_t* node, const Icon icon, const bool repaint_parent)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == ICON);
-    JADE_ASSERT(!node->icon->animation); // animated
+    JADE_ASSERT(node && node->kind == ICON);
+    struct view_node_icon_data* data = node_get_icon_data(node);
+    JADE_ASSERT(!data->animation); // animated
 
     // Get the activity mutex, update the icon data and
     // if part of current activity release the mutex and post
     // a message to the gui task to repaint it.
     JADE_SEMAPHORE_TAKE(gui_mutex);
-    node->icon->icon = icon;
+    data->icon = icon;
     const bool repaint = current_activity && node->activity == current_activity;
     JADE_SEMAPHORE_GIVE(gui_mutex);
 
@@ -1725,18 +1757,19 @@ void gui_update_icon(gui_view_node_t* node, const Icon icon, const bool repaint_
 
 // Takes the gui_mutex, updates the picture, and then only draws the
 // updated item if it is part of the 'current activity'.
+// picture may be null to remove a picture so that the caller can free it.
 void gui_update_picture(gui_view_node_t* node, const Picture* picture, const bool repaint_parent)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == PICTURE);
-    JADE_ASSERT(picture);
+    JADE_ASSERT(node && (node->kind == PICTURE || node->kind == STATIC_PICTURE));
 
     // Get the activity mutex, update the picture data and
     // if part of current activity release the mutex and post
     // a message to the gui task to repaint it.
     JADE_SEMAPHORE_TAKE(gui_mutex);
-    node->picture->picture = picture;
-    const bool repaint = current_activity && node->activity == current_activity;
+    node->kind = picture ? PICTURE : STATIC_PICTURE; // Change to static if NULL
+    struct view_node_picture_data* data = node_get_picture_data(node);
+    data->picture = picture;
+    const bool repaint = picture && current_activity && node->activity == current_activity;
     JADE_SEMAPHORE_GIVE(gui_mutex);
 
     // If part of current activity, draw it immediately
@@ -1750,27 +1783,6 @@ void gui_update_picture(gui_view_node_t* node, const Picture* picture, const boo
             // Simply redraw over the top - eg. if picture same size or larger
             gui_repaint(node);
         }
-    }
-}
-
-static inline color_t DEBUG_COLOR(const uint8_t depth)
-{
-    switch (depth) {
-    case 0:
-        return TFT_RED;
-    case 1:
-        return TFT_ORANGE;
-    case 2:
-        return TFT_YELLOW;
-    case 3:
-        return TFT_GREENYELLOW;
-    case 4:
-        return TFT_GREEN;
-    case 5:
-        return TFT_CYAN;
-
-    default:
-        return TFT_PINK;
     }
 }
 
@@ -1790,145 +1802,153 @@ static inline uint16_t get_step(enum gui_split_type kind, uint16_t total, uint16
     return 0;
 }
 
-// Fully render a node, meaning that it also re-calculates the constraints, push elements to the selectables list, etc
-static void render_node(gui_view_node_t* node, const dispWin_t constraints, const uint8_t depth)
+// Re-calculate node constraints, push elements to the selectables list, etc
+static void pre_render_node(gui_view_node_t* node, const dispWin_t* const cs)
 {
     JADE_ASSERT(node);
 
-    if (node->render_data.is_first_time) {
+    if (node->is_first_render) {
         // now that we know the coordinates of this node we can push it to the list of selectable elements
         if (is_kind_selectable(node->kind)) {
-            push_selectable(node->activity, node, constraints.x1, constraints.y1);
+            push_selectable(node->activity, node, cs->x1, cs->y1);
         }
-
-        // resolve the value for text objects
-        if (node->kind == TEXT) {
-            resolve_text(node);
-        }
-
-        node->render_data.is_first_time = false;
+        node->is_first_render = false;
     }
 
-    // remember the original constrains, we will calculate the others based on those
-    node->render_data.original_constraints = constraints;
+    // remember the original constraints, we will calculate the others based on those
+    node->constraints = *cs;
     calc_render_data(node);
-
-    node->render_data.depth = depth;
-
-    // actually paint the node on-screen
-    repaint_node(node);
+    // node is now ready for repainting
 }
 
-static void render_button(gui_view_node_t* node, const dispWin_t cs, const uint8_t depth)
+// pre-render a node to the given constraints then paint it on-screen
+// always-inline in order to avoid pushing a stack frame when recursing
+static inline __attribute__((always_inline)) void render_node(gui_view_node_t* node, const dispWin_t* const cs)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == BUTTON);
+    pre_render_node(node, cs);
+    repaint_node(node); // actually paint the node on-screen
+}
+
+static void render_button(gui_view_node_t* node)
+{
+    JADE_ASSERT(node && node->kind == BUTTON);
+
+    const dispWin_t* const cs = &node->padded_constraints;
 
     // If the un-selected colour is the same as the selected colour, it implies
     // the button is transparent when not selected, so we can skip filling the content.
     // NOTE: requires the parent is redrawn otherwise button will remain in 'selected' appearance
     // when selection moves on to another item.
-    if (node->is_selected || node->button->color != node->button->selected_color) {
-        display_fill_rect(cs.x1, cs.y1, cs.x2 - cs.x1, cs.y2 - cs.y1,
-            node->is_selected ? node->button->selected_color : node->button->color);
+    const struct view_node_button_data* data = node_get_button_data(node);
+    if (node->is_selected || data->color != data->selected_color) {
+        display_fill_rect(
+            cs->x1, cs->y1, cs->x2 - cs->x1, cs->y2 - cs->y1, node->is_selected ? data->selected_color : data->color);
     }
 
     // Draw any children directly over the current node
-    gui_view_node_t* ptr = node->child;
-    if (ptr) {
-        render_node(ptr, cs, depth + 1);
+    if (node->child) {
+        render_node(node->child, cs);
     }
 }
 
-static void render_vsplit(gui_view_node_t* node, const dispWin_t constraints, const uint8_t depth)
+static void render_vsplit(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == VSPLIT);
+    JADE_ASSERT(node && node->kind == VSPLIT);
+
+    const dispWin_t* const cs = &node->padded_constraints;
 
     uint16_t count = 0;
-    uint16_t y = constraints.y1;
-    uint16_t max_y = constraints.y2;
-    uint16_t width = max_y - y;
+    uint16_t y = cs->y1;
+    const uint16_t max_y = cs->y2;
+    const uint16_t width = max_y - y;
 
     // Draw children in the divided area parts
+    const struct view_node_split_data* data = node_get_split_data(node);
     gui_view_node_t* ptr = node->child;
-    while (ptr && count < node->split->parts) {
+    while (ptr && count < data->parts) {
         uint16_t step;
 
-        if (node->split->values[count] == GUI_SPLIT_FILL_REMAINING) {
+        if (data->values[count] == GUI_SPLIT_FILL_REMAINING) {
             step = max_y - y;
         } else {
-            step = get_step(node->split->kind, width, node->split->values[count]);
+            step = get_step(data->kind, width, data->values[count]);
         }
 
-        dispWin_t child_constraints = {
-            .x1 = constraints.x1,
-            .x2 = constraints.x2,
-            .y1 = y,
-            .y2 = min_u16(y + step, max_y),
-        };
-
-        render_node(ptr, child_constraints, depth + 1);
+        {
+            // Pre-render the node explicitly to reduce stack usage
+            const dispWin_t child_cs = {
+                .x1 = cs->x1,
+                .x2 = cs->x2,
+                .y1 = y,
+                .y2 = min_u16(y + step, max_y),
+            };
+            pre_render_node(ptr, &child_cs);
+            y = child_cs.y2;
+        }
+        repaint_node(ptr); // actually paint the node on-screen
 
         ++count;
-        y = child_constraints.y2;
         ptr = ptr->sibling;
     }
 }
 
-static void render_hsplit(gui_view_node_t* node, const dispWin_t constraints, const uint8_t depth)
+static void render_hsplit(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == HSPLIT);
+    JADE_ASSERT(node && node->kind == HSPLIT);
+
+    const dispWin_t* const cs = &node->padded_constraints;
 
     uint16_t count = 0;
-    uint16_t x = constraints.x1;
-    uint16_t max_x = constraints.x2;
-    uint16_t width = max_x - x;
+    uint16_t x = cs->x1;
+    const uint16_t max_x = cs->x2;
+    const uint16_t width = max_x - x;
 
     // Draw children in the divided area parts
+    const struct view_node_split_data* data = node_get_split_data(node);
     gui_view_node_t* ptr = node->child;
-    while (ptr && count < node->split->parts) {
+    while (ptr && count < data->parts) {
         uint16_t step;
-        if (node->split->values[count] == GUI_SPLIT_FILL_REMAINING) {
+        if (data->values[count] == GUI_SPLIT_FILL_REMAINING) {
             step = max_x - x;
         } else {
-            step = get_step(node->split->kind, width, node->split->values[count]);
+            step = get_step(data->kind, width, data->values[count]);
         }
 
-        dispWin_t child_constraints
-            = { .x1 = x, .x2 = min_u16(x + step, max_x), .y1 = constraints.y1, .y2 = constraints.y2 };
-
-        render_node(ptr, child_constraints, depth + 1);
+        {
+            // Pre-render the node explicitly to reduce stack usage
+            const dispWin_t child_cs = { .x1 = x, .x2 = min_u16(x + step, max_x), .y1 = cs->y1, .y2 = cs->y2 };
+            pre_render_node(ptr, &child_cs);
+            x = child_cs.x2;
+        }
+        repaint_node(ptr); // actually paint the node on-screen
 
         ++count;
-        x = child_constraints.x2;
         ptr = ptr->sibling;
     }
 }
 
-static void render_fill(gui_view_node_t* node, const dispWin_t cs, const uint8_t depth)
+static void render_fill(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == FILL);
+    JADE_ASSERT(node && node->kind == FILL);
 
+    const struct view_node_fill_data* data = node_get_fill_data(node);
     color_t color;
-    if (node->fill->fill_type == FILL_PLAIN) {
-        color = node->is_selected ? node->fill->selected_color : node->fill->color;
-    } else if (node->fill->fill_type == FILL_HIGHLIGHT) {
+    if (data->fill_type == FILL_PLAIN) {
+        color = node->is_selected ? data->selected_color : data->color;
+    } else if (data->fill_type == FILL_HIGHLIGHT) {
         color = gui_get_highlight_color();
-    } else if (node->fill->fill_type == FILL_QR) {
+    } else if (data->fill_type == FILL_QR) {
         color = gui_get_qrcode_color();
     } else {
         JADE_ASSERT(false); // Unknown fill type
     }
 
-    display_fill_rect(cs.x1, cs.y1, cs.x2 - cs.x1, cs.y2 - cs.y1, color);
+    const dispWin_t* const cs = &node->padded_constraints;
+    display_fill_rect(cs->x1, cs->y1, cs->x2 - cs->x1, cs->y2 - cs->y1, color);
 
     // Draw any children directly over the current node
-    gui_view_node_t* ptr = node->child;
-    if (ptr) {
-        render_node(ptr, cs, depth + 1);
+    if (node->child) {
+        render_node(node->child, cs);
     }
 }
 
@@ -1963,127 +1983,131 @@ static inline int resolve_valign(int y, enum gui_vertical_align valign)
 }
 
 // render a text node to screen in the window constrained by cs
-static void render_text(gui_view_node_t* node, dispWin_t cs)
+static void render_text(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == TEXT);
+    JADE_ASSERT(node && node->kind == TEXT);
 
-    display_set_font(node->text->font, NULL);
+    const dispWin_t* const cs = &node->padded_constraints;
+    const struct view_node_text_data* data = node_get_text_data(node);
 
-    if (node->text->scroll) {
+    display_set_font(data->font);
+
+    if (data->scroll) {
         // this text has the scroll enable, so disable wrap
 
         // set the foreground color to the "background color" to remove the previous string
-        _fg = node->is_selected ? node->text->scroll->selected_background_color : node->text->scroll->background_color;
-        display_print_in_area(node->render_data.resolved_text + node->text->scroll->prev_offset,
-            resolve_halign(0, node->text->halign), resolve_valign(0, node->text->valign), cs, 0);
+        _fg = node->is_selected ? data->scroll->selected_background_color : data->scroll->background_color;
+        display_print_in_area(data->text + data->scroll->prev_offset, resolve_halign(0, data->halign),
+            resolve_valign(0, data->valign), cs, 0);
 
         // and now we write the new one using the correct color
-        _fg = node->is_selected ? node->text->selected_color : node->text->color;
-        display_print_in_area(node->render_data.resolved_text + node->text->scroll->offset,
-            resolve_halign(0, node->text->halign), resolve_valign(0, node->text->valign), cs, 0);
+        _fg = node->is_selected ? data->selected_color : data->color;
+        display_print_in_area(
+            data->text + data->scroll->offset, resolve_halign(0, data->halign), resolve_valign(0, data->valign), cs, 0);
 
     } else {
         // normal print with wrap
-        if (node->text->noise) { // with noise
-            const color_t color = node->is_selected ? node->text->selected_color : node->text->color;
+        if (data->noise) { // with noise
+            const color_t color = node->is_selected ? data->selected_color : data->color;
 
             int pos_x = 0;
-            switch (node->text->halign) {
+            switch (data->halign) {
             case GUI_ALIGN_LEFT:
                 pos_x = 0;
                 break;
             case GUI_ALIGN_CENTER:
-                pos_x = (cs.x2 - cs.x1 - display_get_string_width(node->render_data.resolved_text)) / 2;
+                pos_x = (cs->x2 - cs->x1 - display_get_string_width(data->text)) / 2;
                 break;
             case GUI_ALIGN_RIGHT:
-                pos_x = cs.x2 - cs.x1 - display_get_string_width(node->render_data.resolved_text);
+                pos_x = cs->x2 - cs->x1 - display_get_string_width(data->text);
                 break;
             }
 
-            const int pos_y = resolve_valign(0, node->text->valign);
+            const int pos_y = resolve_valign(0, data->valign);
 
+            const size_t text_length = strlen(data->text);
             uint16_t offset_x = 0;
             uint16_t offset_y = 0;
             char buf[2] = { '\0', '\0' };
-            for (size_t i = 0; i < node->render_data.resolved_text_length; ++i) {
-                buf[0] = node->render_data.resolved_text[i];
+            for (size_t i = 0; i < text_length; ++i) {
+                buf[0] = data->text[i];
                 const int char_width = display_get_string_width(buf);
-                if (pos_x + offset_x + char_width >= cs.x2 - cs.x1) {
+                if (pos_x + offset_x + char_width >= cs->x2 - cs->x1) {
                     offset_y += display_get_font_height();
                     offset_x = 0;
                 }
 
-                _fg = node->text->noise->background_color;
+                _fg = data->noise->background_color;
                 buf[0] = 0x61 + get_uniform_random_byte(0x7a - 0x61);
                 display_print_in_area(buf, pos_x + offset_x, pos_y + offset_y, cs, 1);
                 _fg = color;
-                buf[0] = node->render_data.resolved_text[i];
+                buf[0] = data->text[i];
                 display_print_in_area(buf, pos_x + offset_x, pos_y + offset_y, cs, 1);
                 offset_x += char_width;
             }
         } else { // without noise
-            _fg = node->is_selected ? node->text->selected_color : node->text->color;
+            _fg = node->is_selected ? data->selected_color : data->color;
 
-            display_print_in_area(node->render_data.resolved_text, resolve_halign(0, node->text->halign),
-                resolve_valign(0, node->text->valign), cs, 1);
+            display_print_in_area(data->text, resolve_halign(0, data->halign), resolve_valign(0, data->valign), cs, 1);
         }
     }
 }
 
 // render an icon to screen
-static void render_icon(gui_view_node_t* node, const dispWin_t cs, const uint8_t depth)
+static void render_icon(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == ICON);
+    JADE_ASSERT(node && node->kind == ICON);
 
-    if (node->icon) {
+    const dispWin_t* const cs = &node->padded_constraints;
+    struct view_node_icon_data* data = node_get_icon_data(node);
+
+    if (data) {
         color_t color, bg_color;
-        if (node->icon->icon_type == ICON_PLAIN) {
-            color = node->is_selected ? node->icon->selected_color : node->icon->color;
-            bg_color = node->icon->bg_color;
-        } else if (node->icon->icon_type == ICON_QR) {
-            color = node->is_selected ? node->icon->selected_color : node->icon->color;
+        if (data->icon_type == ICON_PLAIN) {
+            color = node->is_selected ? data->selected_color : data->color;
+            bg_color = data->bg_color;
+        } else if (data->icon_type == ICON_QR) {
+            color = node->is_selected ? data->selected_color : data->color;
             bg_color = gui_get_qrcode_color();
         } else {
             JADE_ASSERT(false); // Unknown fill type
         }
 
         const bool transparent = bg_color == color;
-        display_icon(&node->icon->icon, resolve_halign(0, node->icon->halign), resolve_valign(0, node->icon->valign),
-            color, cs, transparent ? NULL : &bg_color);
+        display_icon(&data->icon, resolve_halign(0, data->halign), resolve_valign(0, data->valign), color, cs,
+            transparent ? NULL : &bg_color);
     }
 
     // Draw any children directly over the current node
-    gui_view_node_t* ptr = node->child;
-    if (ptr) {
-        render_node(ptr, cs, depth + 1);
+    if (node->child) {
+        render_node(node->child, cs);
     }
 }
 
 // render a picture to screen
-static void render_picture(gui_view_node_t* node, const dispWin_t cs, const uint8_t depth)
+static void render_picture(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == PICTURE);
+    JADE_ASSERT(node && (node->kind == PICTURE || node->kind == STATIC_PICTURE));
 
-    if (node->picture && node->picture->picture) {
-        display_picture(node->picture->picture, resolve_halign(0, node->picture->halign),
-            resolve_valign(0, node->picture->valign), cs);
+    const dispWin_t* const cs = &node->padded_constraints;
+    struct view_node_picture_data* data = node_get_picture_data(node);
+
+    if (data->picture) {
+        display_picture(data->picture, resolve_halign(0, data->halign), resolve_valign(0, data->valign), cs);
     }
 
     // Draw any children directly over the current node
-    gui_view_node_t* ptr = node->child;
-    if (ptr) {
-        render_node(ptr, cs, depth + 1);
+    if (node->child) {
+        render_node(node->child, cs);
     }
 }
 
 // render a qrguide to screen
-static void render_qrguide(gui_view_node_t* node, const dispWin_t cs, const uint8_t depth)
+static void render_qrguide(gui_view_node_t* node)
 {
-    JADE_ASSERT(node);
-    JADE_ASSERT(node->kind == QRGUIDE);
+    JADE_ASSERT(node && node->kind == QRGUIDE);
+
+    const dispWin_t* const cs = &node->padded_constraints;
 
     // guide dimensions
     const uint16_t gwidth = 2;
@@ -2091,8 +2115,8 @@ static void render_qrguide(gui_view_node_t* node, const dispWin_t cs, const uint
     const uint16_t gnubbin = 2;
 
     // maximum square that fits in the constraints
-    const uint16_t width = cs.x2 - cs.x1;
-    const uint16_t height = cs.y2 - cs.y1;
+    const uint16_t width = cs->x2 - cs->x1;
+    const uint16_t height = cs->y2 - cs->y1;
     const uint16_t square_size = min_u16(width, height);
 #if defined(CONFIG_BOARD_TYPE_JADE_V1_ANY)
     // guides 9% inset
@@ -2102,46 +2126,47 @@ static void render_qrguide(gui_view_node_t* node, const dispWin_t cs, const uint
     const uint16_t inset = square_size / 30;
 #endif
     // guide boundaries
-    const uint16_t left = cs.x1 + (width - square_size) / 2 + inset;
-    const uint16_t right = cs.x2 - (width - square_size) / 2 - inset;
-    const uint16_t top = cs.y1 + (height - square_size) / 2 + inset;
-    const uint16_t bottom = cs.y2 - (height - square_size) / 2 - inset;
+    const uint16_t left = cs->x1 + (width - square_size) / 2 + inset;
+    const uint16_t right = cs->x2 - (width - square_size) / 2 - inset;
+    const uint16_t top = cs->y1 + (height - square_size) / 2 + inset;
+    const uint16_t bottom = cs->y2 - (height - square_size) / 2 - inset;
+
+    const struct view_node_qrguide_data* data = node_get_qrguide_data(node);
     // top-left
-    display_fill_rect(left, top, gwidth, glength, node->qrguide->color);
-    display_fill_rect(left, top, glength, gwidth, node->qrguide->color);
-    display_fill_rect(left + glength, top, gnubbin, gwidth / 2, node->qrguide->color);
-    display_fill_rect(left, top + glength, gwidth / 2, gnubbin, node->qrguide->color);
+    display_fill_rect(left, top, gwidth, glength, data->color);
+    display_fill_rect(left, top, glength, gwidth, data->color);
+    display_fill_rect(left + glength, top, gnubbin, gwidth / 2, data->color);
+    display_fill_rect(left, top + glength, gwidth / 2, gnubbin, data->color);
     // top-right
-    display_fill_rect(right - gwidth, top, gwidth, glength, node->qrguide->color);
-    display_fill_rect(right - glength, top, glength, gwidth, node->qrguide->color);
-    display_fill_rect(right - glength - gnubbin, top, gnubbin, gwidth / 2, node->qrguide->color);
-    display_fill_rect(right - gwidth / 2, top + glength, gwidth / 2, gnubbin, node->qrguide->color);
+    display_fill_rect(right - gwidth, top, gwidth, glength, data->color);
+    display_fill_rect(right - glength, top, glength, gwidth, data->color);
+    display_fill_rect(right - glength - gnubbin, top, gnubbin, gwidth / 2, data->color);
+    display_fill_rect(right - gwidth / 2, top + glength, gwidth / 2, gnubbin, data->color);
     // bottom-left
-    display_fill_rect(left, bottom - glength, gwidth, glength, node->qrguide->color);
-    display_fill_rect(left, bottom - gwidth, glength, gwidth, node->qrguide->color);
-    display_fill_rect(left + glength, bottom - gwidth / 2, gnubbin, gwidth / 2, node->qrguide->color);
-    display_fill_rect(left, bottom - glength - gnubbin, gwidth / 2, gnubbin, node->qrguide->color);
+    display_fill_rect(left, bottom - glength, gwidth, glength, data->color);
+    display_fill_rect(left, bottom - gwidth, glength, gwidth, data->color);
+    display_fill_rect(left + glength, bottom - gwidth / 2, gnubbin, gwidth / 2, data->color);
+    display_fill_rect(left, bottom - glength - gnubbin, gwidth / 2, gnubbin, data->color);
     // bottom-right
-    display_fill_rect(right - gwidth, bottom - glength, gwidth, glength, node->qrguide->color);
-    display_fill_rect(right - glength, bottom - gwidth, glength, gwidth, node->qrguide->color);
-    display_fill_rect(right - glength - gnubbin, bottom - gwidth / 2, gnubbin, gwidth / 2, node->qrguide->color);
-    display_fill_rect(right - gwidth / 2, bottom - glength - gnubbin, gwidth / 2, gnubbin, node->qrguide->color);
+    display_fill_rect(right - gwidth, bottom - glength, gwidth, glength, data->color);
+    display_fill_rect(right - glength, bottom - gwidth, glength, gwidth, data->color);
+    display_fill_rect(right - glength - gnubbin, bottom - gwidth / 2, gnubbin, gwidth / 2, data->color);
+    display_fill_rect(right - gwidth / 2, bottom - glength - gnubbin, gwidth / 2, gnubbin, data->color);
 
     // Draw any children directly over the current node
-    gui_view_node_t* ptr = node->child;
-    if (ptr) {
-        render_node(ptr, cs, depth + 1);
+    if (node->child) {
+        render_node(node->child, cs);
     }
 }
 
 // paint the borders for a view_node
-static void paint_borders(gui_view_node_t* node, const dispWin_t cs)
+static void paint_borders(gui_view_node_t* node, const dispWin_t* const cs)
 {
     JADE_ASSERT(node);
     JADE_ASSERT(node->borders);
 
-    const uint16_t width = cs.x2 - cs.x1;
-    const uint16_t height = cs.y2 - cs.y1;
+    const uint16_t width = cs->x2 - cs->x1;
+    const uint16_t height = cs->y2 - cs->y1;
 
     color_t* color = NULL;
     if (node->is_selected) {
@@ -2157,16 +2182,16 @@ static void paint_borders(gui_view_node_t* node, const dispWin_t cs)
     uint16_t thickness;
 
     if ((thickness = get_border_thickness(node->borders, GUI_BORDER_TOP_BIT))) {
-        display_fill_rect(cs.x1, cs.y1, width, thickness, *color); // top
+        display_fill_rect(cs->x1, cs->y1, width, thickness, *color); // top
     }
     if ((thickness = get_border_thickness(node->borders, GUI_BORDER_RIGHT_BIT))) {
-        display_fill_rect(cs.x2 - thickness, cs.y1, thickness, height, *color); // right
+        display_fill_rect(cs->x2 - thickness, cs->y1, thickness, height, *color); // right
     }
     if ((thickness = get_border_thickness(node->borders, GUI_BORDER_BOTTOM_BIT))) {
-        display_fill_rect(cs.x1, cs.y2 - thickness, width, thickness, *color); // bottom
+        display_fill_rect(cs->x1, cs->y2 - thickness, width, thickness, *color); // bottom
     }
     if ((thickness = get_border_thickness(node->borders, GUI_BORDER_LEFT_BIT))) {
-        display_fill_rect(cs.x1, cs.y1, thickness, height, *color); // left
+        display_fill_rect(cs->x1, cs->y1, thickness, height, *color); // left
     }
 }
 
@@ -2180,41 +2205,42 @@ static void repaint_node(gui_view_node_t* node)
 
     // borders use the un-padded constraints
     if (node->borders) {
-        dispWin_t constraints = node->render_data.original_constraints;
+        dispWin_t cs = node->constraints;
 
         // margins affect borders
-        constraints.y1 += node->margins.top;
-        constraints.x2 -= node->margins.right;
-        constraints.y2 -= node->margins.bottom;
-        constraints.x1 += node->margins.left;
+        cs.y1 += node->margins.top;
+        cs.x2 -= node->margins.right;
+        cs.y2 -= node->margins.bottom;
+        cs.x1 += node->margins.left;
 
-        paint_borders(node, constraints);
+        paint_borders(node, &cs);
     }
 
     switch (node->kind) {
     case HSPLIT:
-        render_hsplit(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_hsplit(node);
         break;
     case VSPLIT:
-        render_vsplit(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_vsplit(node);
         break;
     case TEXT:
-        render_text(node, node->render_data.padded_constraints); // text does not have child nodes
+        render_text(node);
         break;
     case FILL:
-        render_fill(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_fill(node);
         break;
     case BUTTON:
-        render_button(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_button(node);
         break;
     case ICON:
-        render_icon(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_icon(node);
         break;
     case PICTURE:
-        render_picture(node, node->render_data.padded_constraints, node->render_data.depth);
+    case STATIC_PICTURE:
+        render_picture(node);
         break;
     case QRGUIDE:
-        render_qrguide(node, node->render_data.padded_constraints, node->render_data.depth);
+        render_qrguide(node);
         break;
     }
 }
@@ -2224,8 +2250,8 @@ static void render_activity(gui_activity_t* activity)
     JADE_ASSERT(activity);
     JADE_ASSERT(activity->root_node);
 
-    const bool first_time = activity->root_node->render_data.is_first_time;
-    render_node(activity->root_node, activity->win, 0);
+    const bool first_time = activity->root_node->is_first_render;
+    render_node(activity->root_node, &activity->win);
 
     if (first_time && activity->selectables) {
         // If the activity has an 'initial_selection' and it appears active, select it now
@@ -2262,9 +2288,6 @@ static bool update_status_bar(const bool force_redraw)
     }
 
     bool updated = false;
-
-    dispWin_t status_bar_cs = GUI_DISPLAY_WINDOW;
-    status_bar_cs.y2 = status_bar_cs.y1 + GUI_STATUS_BAR_HEIGHT;
 
     // NOTE: we use the internal 'update_text_node_text()' method here
     // since we don't want to redraw each update individually, but rather
@@ -2309,7 +2332,7 @@ static bool update_status_bar(const bool force_redraw)
         color_t color = new_bat == 0 ? TFT_RED : new_bat == 1 ? TFT_ORANGE : TFT_WHITE;
 #else
         // If no battery on the device then hide the battery icon with background color
-        color_t color = status_bar.root->fill->color;
+        color_t color = node_get_fill_data(status_bar.root)->color;
 #endif
         if (power_get_battery_charging()) {
             new_bat = new_bat + 12;
@@ -2326,7 +2349,13 @@ static bool update_status_bar(const bool force_redraw)
     status_bar.battery_update_counter--;
 
     if (status_bar.updated || force_redraw) {
-        render_node(status_bar.root, status_bar_cs, 0);
+        {
+            // Pre-render the status bar explicitly to reduce stack usage
+            dispWin_t status_bar_cs = GUI_DISPLAY_WINDOW;
+            status_bar_cs.y2 = status_bar_cs.y1 + GUI_STATUS_BAR_HEIGHT;
+            pre_render_node(status_bar.root, &status_bar_cs);
+        }
+        repaint_node(status_bar.root); // actually paint the status bar on-screen
         status_bar.updated = false;
         updated = true;
     }
@@ -2349,11 +2378,21 @@ static size_t handle_gui_input_queue(bool* switched_activities)
     while ((job = xRingbufferReceive(gui_input_queue, &item_size, 10 / portTICK_PERIOD_MS))) {
         JADE_ASSERT(item_size == sizeof(gui_task_job_t));
 
-        // *Either* repainting a node *or* moving to a whole new activity
-        JADE_ASSERT(!job->node_to_repaint != !job->new_activity);
+        // A job can be be ONE of the following:
+        // - repainting a node, OR
+        // - moving to another activity and optionally freeing other activities
         activity_holder_t* to_free = job->to_free;
 
-        if (job->new_activity && job->new_activity != current_activity) {
+        if (job->node_to_repaint) {
+            // Repaint job
+            JADE_ASSERT(!job->new_activity && !job->to_free);
+            if (job->node_to_repaint->activity == current_activity) {
+                // Node belongs to the current activity: repaint it
+                repaint_node(job->node_to_repaint);
+            }
+        } else if (!job->new_activity) {
+            JADE_ASSERT(false); // Not a repaint or a move to new activity job
+        } else if (job->new_activity != current_activity) {
             *switched_activities = true;
 
             // Unregister the old activity's event handlers
@@ -2374,10 +2413,8 @@ static size_t handle_gui_input_queue(bool* switched_activities)
             // free the old activities *before* the code below runs, as it makes allocations.
             // If we defer the 'frees' until later, we end up fragmenting the memory, which is
             // particularly detrimental to no-psram devices.
-            if (to_free) {
-                free_activities(to_free);
-                to_free = NULL;
-            }
+            free_activities(to_free);
+            to_free = NULL;
 
             // Update the status bar text for the new activity
             if (current_activity->status_bar) {
@@ -2398,18 +2435,19 @@ static size_t handle_gui_input_queue(bool* switched_activities)
             }
         }
 
-        // May have been passed a node to repaint
-        // Only do so if it belongs on the current activity and we haven't just switched
-        if (job->node_to_repaint && job->node_to_repaint->activity == current_activity && !job->new_activity) {
-            // Issue repaint command on the node passed
-            repaint_node(job->node_to_repaint);
-        }
+        // Save done semaphore before returning the ringbuffer slot
+        SemaphoreHandle_t done = job->done;
 
         // Return the ringbuffer slot
         vRingbufferReturnItem(gui_input_queue, job);
 
         // Free any outstanding activities, if required (and not already done)
         free_activities(to_free);
+
+        // Signal completion if a semaphore was provided
+        if (done) {
+            xSemaphoreGive(done);
+        }
 
         // Count jobs handled so we can return
         ++jobs_handled;
@@ -2450,6 +2488,9 @@ static bool update_updateables(void)
 // gui task, for managing display/activities
 static void gui_task(void* args)
 {
+    // Set the global handle for this task
+    gui_task_handle = xTaskGetCurrentTaskHandle();
+
     // Flush/clear display as soon as we're able
     JADE_SEMAPHORE_TAKE(gui_mutex);
     display_flush();
@@ -2459,7 +2500,9 @@ static void gui_task(void* args)
     const TickType_t period = 1000 / GUI_TARGET_FRAMERATE / portTICK_PERIOD_MS;
     TickType_t last_wake = xTaskGetTickCount();
 
-    for (;;) {
+    gui_task_should_run = true;
+    gui_task_running = true;
+    while (gui_task_should_run) {
 
         // Wait for the next frame
         // Note: this task is never suspended, so no need to re-fetch the tick-
@@ -2493,7 +2536,30 @@ static void gui_task(void* args)
         JADE_SEMAPHORE_GIVE(gui_mutex);
     }
 
+#ifdef CONFIG_LIBJADE
+    // gui task is exiting - only happens for libjade.
+    // Free all activities
+    current_activity = NULL;
+    free_activities(existing_activities);
+    existing_activities = NULL;
+
+    // Delete the main input queue
+    if (gui_input_queue) {
+        vRingbufferDelete(gui_input_queue);
+        gui_input_queue = NULL;
+    }
+
+    // Delete the mutex semaphore
+    if (gui_mutex) {
+        vSemaphoreDelete(gui_mutex);
+        gui_mutex = NULL;
+    }
+
+    // Clear handle and running flag.
+    gui_task_handle = NULL;
+    gui_task_running = false;
     vTaskDelete(NULL);
+#endif // CONFIG_LIBJADE
 }
 
 // TODO: different functions for different types of click
@@ -2560,6 +2626,13 @@ void gui_set_activity_initial_selection(gui_view_node_t* node)
     node->activity->initial_selection = node;
 }
 
+static void gui_post(const gui_task_job_t* task, const char* task_name)
+{
+    while (xRingbufferSend(gui_input_queue, task, sizeof(*task), 500 / portTICK_PERIOD_MS) != pdTRUE) {
+        JADE_LOGW("Failed to send %s to gui", task_name);
+    }
+}
+
 // Post a node to the gui task to be repainted
 // Should ultimately result in a call to repaint_node() from the gui_task.
 // This ensures all calls to the undlerying display driver come from the gui_task
@@ -2576,26 +2649,23 @@ void gui_repaint(gui_view_node_t* node)
     }
 
     // Post the node to the gui task
-    const gui_task_job_t node_repaint_info = { .node_to_repaint = node, .new_activity = NULL, .to_free = NULL };
-    while (xRingbufferSend(gui_input_queue, &node_repaint_info, sizeof(node_repaint_info), 500 / portTICK_PERIOD_MS)
-        != pdTRUE) {
-        // wait for a spot in the ringbuffer
-        JADE_LOGW("Failed to send node repaint info using gui ringbuffer");
-    }
+    const gui_task_job_t node_repaint_info = { .node_to_repaint = node };
+    gui_post(&node_repaint_info, "repaint");
 }
 
-// Call to initiate a change of current activity - optionally freeing other managed activities.
-// Can also pass a 'retain' activity which is not made current, but is retained and not freed.
-void gui_set_current_activity_ex(gui_activity_t* new_current, const bool free_managed_activities)
+// Call to initiate a change of current activity - optionally freeing other managed activities
+// (either all of them, if free_managed_activities is true, or only to_destroy if given).
+void gui_set_current_activity_impl(
+    gui_activity_t* new_current, gui_activity_t* to_destroy, const bool free_managed_activities, SemaphoreHandle_t done)
 {
     JADE_ASSERT(new_current);
+    JADE_ASSERT(!to_destroy || !free_managed_activities); // Either one, all or none
 
-    // We will post the gui task the new activity, and the list of activities it can free
-    gui_task_job_t switch_info = { .node_to_repaint = NULL, .new_activity = new_current, .to_free = NULL };
+    // job info initially includes just the new activity
+    gui_task_job_t switch_info = { .new_activity = new_current };
 
-    // If freeing others, partition existing activities into those to keep (new current and the
-    //  passed 'retain' activity) and those to free (all others).
-    if (free_managed_activities) {
+    if (to_destroy || free_managed_activities) {
+        // Freeing other activity/activities: partition into keep and free lists
         JADE_SEMAPHORE_TAKE(gui_mutex);
         activity_holder_t* holder = existing_activities;
         existing_activities = NULL;
@@ -2603,7 +2673,7 @@ void gui_set_current_activity_ex(gui_activity_t* new_current, const bool free_ma
         while (holder) {
             activity_holder_t* const next = holder->next;
 
-            if (&holder->activity == new_current) {
+            if (&holder->activity == new_current || (to_destroy && &holder->activity != to_destroy)) {
                 // Retain this activity
                 holder->next = existing_activities;
                 existing_activities = holder;
@@ -2616,26 +2686,42 @@ void gui_set_current_activity_ex(gui_activity_t* new_current, const bool free_ma
         }
 
         // Sanity check
-        // 'existing_activities' should be the new current activity only, or be completely empty
-        // (if current activity is an "unmanaged" activity)
-        JADE_ASSERT(
-            !existing_activities || ((&existing_activities->activity == new_current) && !existing_activities->next));
+        if (!to_destroy && existing_activities) {
+            // existing_activities should be the new current activity only
+            JADE_ASSERT(&existing_activities->activity == new_current && !existing_activities->next);
+        }
 
         JADE_SEMAPHORE_GIVE(gui_mutex);
     }
 
     // Post the new activity and the list to free to the gui task
-    while (xRingbufferSend(gui_input_queue, &switch_info, sizeof(switch_info), 500 / portTICK_PERIOD_MS) != pdTRUE) {
-        // wait for a spot in the ringbuffer
-        JADE_LOGW("Failed to send new activity using gui ringbuffer");
-    }
+    switch_info.done = done;
+    gui_post(&switch_info, "new activity");
+}
+
+void gui_set_current_activity_ex(gui_activity_t* new_current, const bool free_managed_activities)
+{
+    gui_set_current_activity_impl(new_current, NULL, free_managed_activities, NULL);
 }
 
 // Initiate change of 'current' activity
 void gui_set_current_activity(gui_activity_t* new_current)
 {
     // Set a new activity without freeing any other activities
-    gui_set_current_activity_ex(new_current, false);
+    gui_set_current_activity_impl(new_current, NULL, false, NULL);
+}
+
+void gui_destroy_current_activity(gui_activity_t* current_act, gui_activity_t* prev_act)
+{
+    // Create a semaphore to be signaled when the gui task finishes
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    JADE_ASSERT(done);
+
+    gui_set_current_activity_impl(prev_act, current_act, false, done);
+
+    // Wait for the gui task to finish
+    xSemaphoreTake(done, portMAX_DELAY);
+    vSemaphoreDelete(done);
 }
 
 // Create a new event_data structure, and attach to the activity

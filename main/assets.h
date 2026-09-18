@@ -1,8 +1,12 @@
 #ifndef JADE_ASSETS_H_
 #define JADE_ASSETS_H_
 
+#include "jade_assert.h"
 #include "utils/cbor_rpc.h"
 #include "utils/network.h"
+
+// Maximum allowed precision for supported assets
+#define ASSET_PRECISION_MAX 8
 
 // NOTE: strings here may not be nul-terminated as may directly reference message fields
 typedef struct _asset_info {
@@ -15,9 +19,10 @@ typedef struct _asset_info {
     uint8_t precision;
 } asset_info_t;
 
-bool assets_get_allocate(const char* field, const CborValue* value, asset_info_t** data, size_t* written);
+WARN_UNUSED_RESULT bool assets_get_allocate(
+    const char* field, const CborValue* value, asset_info_t** data, size_t* written);
 
-bool assets_get_info(network_t network_id, const asset_info_t* assets, size_t num_assets, const char* asset_id,
-    asset_info_t* asset_info_out);
+WARN_UNUSED_RESULT bool assets_get_info(network_t network_id, const asset_info_t* assets, size_t num_assets,
+    const char* asset_id, asset_info_t* asset_info_out);
 
 #endif /* JADE_ASSETS_H_ */

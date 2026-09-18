@@ -57,7 +57,6 @@ static size_t ble_read = 0;
 static uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
 static uint8_t* full_ble_data_in = NULL;
 static TickType_t last_processing_time = 0;
-static uint8_t* ble_data_out = NULL;
 static uint16_t peer_conn_handle = 0;
 static const size_t ATT_OVERHEAD = 3;
 static const size_t MAX_BLE_ATTR_SIZE = 512;
@@ -85,49 +84,41 @@ static int gatt_chr_event(
     JADE_LOGI("Entering gatt_chr_event op: %d for attr: %d", ctxt->op, attr_handle);
 
     if (attr_handle == rx_val_handle) {
-        switch (ctxt->op) {
-        case BLE_GATT_ACCESS_OP_WRITE_CHR:
-            JADE_LOGI("Reading from ble device");
-
-            const uint16_t ble_msg_len = OS_MBUF_PKTLEN(ctxt->om);
-            JADE_LOGI("Reading %u bytes", ble_msg_len);
-
-            if (ble_msg_len == 0) {
-                return 0;
-            }
-
-            // Check we won't overrun the buffer
-            if (ble_read + ble_msg_len >= MAX_INPUT_MSG_SIZE) {
-                const bool force_reject_if_no_msg = true; // reject what we have in the buffer
-                const size_t new_data = 0;
-                handle_data(
-                    full_ble_data_in, &ble_read, new_data, &last_processing_time, force_reject_if_no_msg, ble_data_out);
-                JADE_ASSERT(ble_read == 0);
-            }
-
-            uint16_t out_copy_len;
-            uint8_t* const ble_data_in = full_ble_data_in + 1;
-            const int rc = ble_hs_mbuf_to_flat(ctxt->om, ble_data_in + ble_read, ble_msg_len, &out_copy_len);
-            JADE_ASSERT(rc == 0);
-            JADE_ASSERT(out_copy_len == ble_msg_len);
-
-            JADE_LOGD("Passing %u+%u bytes from ble device to common handler", ble_read, ble_msg_len);
-            const bool force_reject_if_no_msg = false;
-            handle_data(
-                full_ble_data_in, &ble_read, ble_msg_len, &last_processing_time, force_reject_if_no_msg, ble_data_out);
-            return 0;
-
-        default:
+        if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
             JADE_LOGW("Unexpected gatt access op: %u for rx chr, ignoring", ctxt->op);
             return 0;
         }
+
+        uint8_t* const ble_data_in = full_ble_data_in + 1;
+        uint16_t new_data_len = OS_MBUF_PKTLEN(ctxt->om);
+        JADE_LOGI("Reading %u bytes from ble device", new_data_len);
+
+        while (new_data_len) {
+            // Copy as many bytes as possible into the ble read buffer.
+            // The read buffer can never become full: if it fills up with
+            // unparsable data, then handle_data() rejects the whole buffer.
+            JADE_ASSERT(ble_read < MAX_INPUT_MSG_SIZE);
+            const size_t remaining_len = MAX_INPUT_MSG_SIZE - ble_read;
+            const size_t copy_len = new_data_len > remaining_len ? remaining_len : new_data_len;
+            // handle_data() requires size_t, but the ble functions use uint16_t:
+            // assert copy_len fits in uint16_t as a belt-n-braces sanity check.
+            JADE_ASSERT(copy_len <= 0xffff);
+
+            uint16_t out_len;
+            const int rc = ble_hs_mbuf_to_flat(ctxt->om, ble_data_in + ble_read, copy_len, &out_len);
+            JADE_ASSERT(rc == 0);
+            JADE_ASSERT(out_len == copy_len);
+
+            // Pass data through to the common handler
+            handle_data(full_ble_data_in, &ble_read, copy_len, &last_processing_time);
+            new_data_len -= copy_len;
+        }
     } else if (attr_handle == tx_val_handle) {
         JADE_LOGW("Received op %u for tx chr, ignoring", ctxt->op);
-        return 0;
+    } else {
+        char buf[BLE_UUID_STR_LEN];
+        JADE_LOGW("Unexpected uuid, ignoring: %s", ble_uuid_to_str(ctxt->chr->uuid, buf));
     }
-
-    char buf[BLE_UUID_STR_LEN];
-    JADE_LOGW("Unexpected uuid, ignoring: %s", ble_uuid_to_str(ctxt->chr->uuid, buf));
     return 0;
 }
 
@@ -296,7 +287,7 @@ static void ble_start_advertising(void)
     JADE_LOGI("Advertising started, (type %u, nrpa %d) with address:", own_addr_type, isnrpa);
     print_addr(addr_val);
 
-    // Refeed entropy - this is called whenever the advertisied address changes  - ie.
+    // Refeed entropy - this is called whenever the advertised address changes  - ie.
     // when BLE enabled, and every minute or so all the time no client is connected.
     // Called again when the client disconnects.  So frequent (if BLE enabled) but not
     // completely predictable ...
@@ -449,7 +440,6 @@ bool ble_init(TaskHandle_t* ble_handle)
 {
     JADE_ASSERT(ble_handle);
     JADE_ASSERT(!full_ble_data_in);
-    JADE_ASSERT(!ble_data_out);
 
     // Initialise assuming preferred MTU and sanity check value
     set_ble_max_write_size_for_mtu(CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU);
@@ -459,7 +449,6 @@ bool ble_init(TaskHandle_t* ble_handle)
     // Extra byte at the start for source-id
     full_ble_data_in = (uint8_t*)JADE_MALLOC_PREFER_SPIRAM(MAX_INPUT_MSG_SIZE + 1);
     full_ble_data_in[0] = SOURCE_BLE;
-    ble_data_out = JADE_MALLOC_PREFER_SPIRAM(MAX_OUTPUT_MSG_SIZE);
     p_ble_writer_handle = ble_handle;
 
     ble_writer_shutdown_done = xSemaphoreCreateBinary();

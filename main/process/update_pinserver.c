@@ -41,8 +41,7 @@ void show_pinserver_details(void)
 
     // If no pinserver set, show the help screen
     if (!have_pubkey && !have_urlA && !have_urlB && !have_cert) {
-        const char* message[] = { "Custom Oracle not set" };
-        await_message_activity(message, 1);
+        await_message("Custom Oracle not set");
         return;
     }
 
@@ -88,9 +87,8 @@ int update_pinserver(const CborValue* const params, const char** errmsg)
 
     int retval = CBOR_RPC_BAD_PARAMETERS;
 
-    // 1. update or erase the pinserver details
-    bool reset_details = false;
-    rpc_get_boolean("reset_details", params, &reset_details);
+    // 1. update or erase the pinserver details (defaults to false)
+    const bool reset_details = rpc_get_bool_or("reset_details", params, false);
 
     size_t urlA_len = 0, urlB_len = 0;
     rpc_get_string("urlA", sizeof(urlA), params, urlA, &urlA_len);
@@ -177,9 +175,8 @@ int update_pinserver(const CborValue* const params, const char** errmsg)
         }
     }
 
-    // 2. update or erase the certificate
-    bool reset_certificate = false;
-    rpc_get_boolean("reset_certificate", params, &reset_certificate);
+    // 2. update or erase the certificate (defaults to false)
+    const bool reset_certificate = rpc_get_bool_or("reset_certificate", params, false);
     const bool set_certificate = rpc_has_field_data("certificate", params);
 
     if (set_certificate && reset_certificate) {

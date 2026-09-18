@@ -20,16 +20,17 @@ void get_master_blinding_key_process(void* process_ptr)
     if (keychain_get_confirm_export_blinding_key()) {
         // Optional field to suppress asking user for permission and instead
         // error in the cases where we would normally need to ask the user.
-        bool onlyIfSilent = false;
+        bool only_if_silent = false;
 
         CborValue params;
         const CborError cberr = cbor_value_map_find_value(&process->ctx.value, CBOR_RPC_TAG_PARAMS, &params);
-        if (cberr == CborNoError || cbor_value_is_valid(&params) || cbor_value_is_map(&params)) {
-            rpc_get_boolean("only_if_silent", &params, &onlyIfSilent);
+        if (cberr == CborNoError && cbor_value_is_valid(&params) && cbor_value_is_map(&params)) {
+            // This field is optional and defaults to false if not present (initialized above)
+            only_if_silent = rpc_get_bool_or("only_if_silent", &params, false);
         }
 
         const char* question[] = { "Export master", "blinding key?" };
-        if (onlyIfSilent || !await_yesno_activity("Blinding Key", question, 2, true, "blkstrm.com/blindingkey")) {
+        if (only_if_silent || !await_yesno_activity("Blinding Key", question, 2, true, "blkstrm.com/blindingkey")) {
             JADE_LOGW("User declined to export master blinding key");
             jade_process_reject_message(
                 process, CBOR_RPC_USER_CANCELLED, "User declined to export master blinding key");
@@ -44,7 +45,7 @@ void get_master_blinding_key_process(void* process_ptr)
     JADE_STATIC_ASSERT(sizeof(keychain_get()->master_unblinding_key) == HMAC_SHA512_LEN);
 
     jade_process_reply_to_message_bytes(
-        process->ctx, keychain_get()->master_unblinding_key + HMAC_SHA512_LEN / 2, HMAC_SHA512_LEN / 2);
+        &process->ctx, keychain_get()->master_unblinding_key + HMAC_SHA512_LEN / 2, HMAC_SHA512_LEN / 2);
     JADE_LOGI("Success");
 
 cleanup:

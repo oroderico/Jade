@@ -30,7 +30,7 @@ static gui_activity_t* make_otp_details_activities(const otpauth_ctx_t* ctx, con
 
     const char* const title = initial_confirmation ? "Confirm OTP" : "OTP Details";
     const bool show_help_btn = false;
-    char display_str[128];
+    char display_str[OTP_MAX_LABEL_LEN];
 
     // First row, name
     gui_view_node_t* splitname;
@@ -76,7 +76,7 @@ static gui_activity_t* make_otp_details_activities(const otpauth_ctx_t* ctx, con
 
     if (ctx->label && ctx->label_len) {
         // urldecode the label string - use font with no messed-with characters
-        urldecode(ctx->label, ctx->label_len, display_str, sizeof(display_str));
+        JADE_ASSERT(urldecode(ctx->label, ctx->label_len, display_str, sizeof(display_str)));
     } else {
         const int ret = snprintf(display_str, sizeof(display_str), "<None>");
         JADE_ASSERT(ret > 0 && ret < sizeof(display_str));
@@ -98,7 +98,7 @@ static gui_activity_t* make_otp_details_activities(const otpauth_ctx_t* ctx, con
 
     if (ctx->issuer && ctx->issuer_len) {
         // urldecode the issuer string - use font with no messed-with characters
-        urldecode(ctx->issuer, ctx->issuer_len, display_str, sizeof(display_str));
+        JADE_ASSERT(urldecode(ctx->issuer, ctx->issuer_len, display_str, sizeof(display_str)));
     } else {
         const int ret = snprintf(display_str, sizeof(display_str), "<None>");
         JADE_ASSERT(ret > 0 && ret < sizeof(display_str));
@@ -325,10 +325,8 @@ gui_activity_t* make_show_totp_code_activity(const char* name, const char* times
     gui_set_parent(*txt_ts, node);
     gui_set_align(*txt_ts, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
 
-#ifndef CONFIG_LIBJADE_NO_GUI
     // Display 'progress' bar (time remaining)
     make_progress_bar(vsplit, progress_bar);
-#endif
 
     // Display the OTP code large/central
     gui_make_fill(&node, TFT_BLACK, FILL_PLAIN, vsplit);

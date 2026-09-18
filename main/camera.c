@@ -9,6 +9,7 @@
 #include "jade_tasks.h"
 #include "power.h"
 #include "sensitive.h"
+#include "storage.h"
 #include "ui.h"
 #include "utils/event.h"
 #include "utils/malloc_ext.h"
@@ -36,6 +37,11 @@ void camera_set_debug_image(const uint8_t* data, const size_t len)
 // When the camera is running we ensure the timeout is at least this value
 // as we don't want the unit to shut down because of apparent inactivity.
 #define CAMERA_MIN_TIMEOUT_SECS 300
+
+// Flag set to false to request the camera task exits its loop cleanly.
+static volatile bool camera_task_should_run = false;
+// Set once the camera task has finished and returned.
+static volatile bool camera_task_running = false;
 
 // Size of the image as provided by the camera
 #define CAMERA_IMAGE_RESOLUTION FRAMESIZE_QVGA
@@ -205,6 +211,9 @@ typedef struct {
 
     // Context info passed to that function
     void* ctx;
+
+    // Output: the camera activity created (if show_ui)
+    gui_activity_t* camera_act;
 } camera_task_config_t;
 
 // Signal to the caller that we are done, and await our death
@@ -227,7 +236,6 @@ static void camera_post_exit_event_and_await_death(void)
 
 static void jade_camera_init(void)
 {
-#if !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
     JADE_LOGI("CAMERA_IMAGE_WIDTH: %u", CAMERA_IMAGE_WIDTH);
     JADE_LOGI("CAMERA_IMAGE_HEIGHT: %u", CAMERA_IMAGE_HEIGHT);
     JADE_LOGI("UI_CAMERA_IMAGE_WIDTH: %u", UI_CAMERA_IMAGE_WIDTH);
@@ -245,7 +253,9 @@ static void jade_camera_init(void)
         JADE_LOGE("Failed to inititialise/power camera on: %u", ret);
     }
 
-    const camera_config_t camera_config = { .pin_d0 = CONFIG_CAMERA_D0,
+    const camera_config_t camera_config = {
+#if !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
+        .pin_d0 = CONFIG_CAMERA_D0,
         .pin_d1 = CONFIG_CAMERA_D1,
         .pin_d2 = CONFIG_CAMERA_D2,
         .pin_d3 = CONFIG_CAMERA_D3,
@@ -266,14 +276,15 @@ static void jade_camera_init(void)
         .ledc_timer = LEDC_TIMER_0,
         .xclk_freq_hz = CONFIG_CAMERA_XCLK_FREQ,
 
-        .pixel_format = PIXFORMAT_GRAYSCALE,
-        .frame_size = CAMERA_IMAGE_RESOLUTION,
-
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
+#endif
+        .pixel_format = PIXFORMAT_GRAYSCALE,
+        .frame_size = CAMERA_IMAGE_RESOLUTION,
 
-        .jpeg_quality = 0 };
+        .jpeg_quality = 0
+    };
     const esp_err_t err = esp_camera_init(&camera_config);
     JADE_LOGI("Camera init done");
     if (err != ESP_OK) {
@@ -281,6 +292,7 @@ static void jade_camera_init(void)
         camera_post_exit_event_and_await_death();
     }
 
+#if !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
     sensor_t* camera_sensor = esp_camera_sensor_get();
     JADE_ASSERT(camera_sensor);
 
@@ -311,12 +323,11 @@ static void jade_camera_init(void)
             JADE_LOGE("Failed to set camera vflip, returned: %d", vret);
         }
     }
-
+#endif // !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
 #if defined(CONFIG_DISPLAY_TOUCHSCREEN)
     touchscreen_deinit();
     touchscreen_init();
 #endif
-#endif // !defined(CONFIG_ETH_USE_OPENETH) && defined(ESP_PLATFORM)
 }
 
 // Stop the camera
@@ -328,6 +339,15 @@ static void jade_camera_stop(void)
     touchscreen_deinit();
     touchscreen_init();
 #endif
+}
+
+// Signal the camera task to exit and wait until it has cleared all GUI resources
+void camera_stop(void)
+{
+    camera_task_should_run = false;
+    while (camera_task_running) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
 }
 
 static inline bool invoke_user_cb_fn(const camera_task_config_t* camera_config, const camera_fb_t* fb)
@@ -357,8 +377,12 @@ static void jade_camera_task(void* data)
 
     typedef void (*copy_camera_image_fn_t)(
         uint8_t[DISPLAY_IMAGE_HEIGHT][DISPLAY_IMAGE_WIDTH], const uint8_t[CAMERA_IMAGE_HEIGHT][CAMERA_IMAGE_WIDTH]);
+    // The user may have persisted an extra 180-degree rotation to correct for camera
+    // modules which can be physically mounted either way up (eg. on some DIY units).
+    // This composes with any flipped display orientation, hence the inequality.
+    const bool camera_rotated = storage_get_gui_flags() & GUI_FLAGS_CAMERA_ROTATED;
     copy_camera_image_fn_t copy_camera_image
-        = gui_get_flipped_orientation() ? COPY_CAMERA_IMAGE_FLIPPED : COPY_CAMERA_IMAGE_STRAIGHT;
+        = (gui_get_flipped_orientation() != camera_rotated) ? COPY_CAMERA_IMAGE_FLIPPED : COPY_CAMERA_IMAGE_STRAIGHT;
 
     camera_task_config_t* const camera_config = (camera_task_config_t*)data;
     JADE_ASSERT(camera_config->fn_process);
@@ -389,6 +413,7 @@ static void jade_camera_task(void* data)
         // Create camera screen
         act = make_camera_activity(&image_node, &label_node, camera_config->show_click_button,
             camera_config->qr_guide_type, camera_config->progress_bar, camera_config->help_url);
+        camera_config->camera_act = act;
         gui_set_current_activity(act);
     }
 
@@ -428,7 +453,9 @@ static void jade_camera_task(void* data)
     // Loop periodically refreshes screen image from camera, and waits for button event
     bool done = false;
     uint32_t num_captures = 0;
-    while (!done) {
+    camera_task_should_run = true;
+    camera_task_running = true;
+    while (!done && camera_task_should_run) {
         // Capture camera output
         camera_fb_t* const fb = esp_camera_fb_get();
         if (!fb) {
@@ -495,26 +522,32 @@ static void jade_camera_task(void* data)
 
     // Finished with camera - free everything and kill task
     if (camera_config->show_ui) {
+        // Null picture under gui_mutex so the GUI task cannot call display_picture()
+        // with our stack-allocated 'pic' after this task's stack is freed.
+        const bool repaint_parent = false;
+        gui_update_picture(image_node, NULL, repaint_parent);
         SENSITIVE_POP(image_buffer);
         free(image_buffer);
     }
+    camera_task_running = false;
     camera_post_exit_event_and_await_death();
 }
 
 void jade_camera_process_images(camera_process_fn_t fn, void* ctx, const bool show_ui, const char* text_label,
     const bool show_click_button, const qr_guide_type_t qr_guide_type, const char* help_url,
-    progress_bar_t* progress_bar)
+    progress_bar_t* progress_bar, gui_activity_t** act_out)
 {
     JADE_ASSERT(fn);
     // ctx is optional
 
-    // show_ui indicates whether to show a ui or collect cmaera data 'silently'
+    // show_ui indicates whether to show a ui or collect camera data 'silently'
     // text_label is optional
     // text_button is optional - indicates we want the user to select the images presented
     // (otherwise all images are presented) to the given callback function ctx.fn_process()
     // show_qr_frame_guide is optional - if set guides for ideal QR placement are shown
     // help_url is optional - if preset a '?' (and help screen) are shown
     // progress_bar is optional, and is for providing feedback for multi-frame scanning
+    // act_out is optional - if provided receives the camera activity created (when show_ui is true)
     // NOTE: not valid to have a label, button[label], help_url, qr frame or progress bar if no ui shown
     // NOTE: atm show_click_btn and help_url are mutually exclusive
     if (!show_ui) {
@@ -533,7 +566,8 @@ void jade_camera_process_images(camera_process_fn_t fn, void* ctx, const bool sh
         .qr_guide_type = qr_guide_type,
         .progress_bar = progress_bar,
         .fn_process = fn,
-        .ctx = ctx };
+        .ctx = ctx,
+        .camera_act = NULL };
 
     // When running the camera task we set the minimum idle timeout to keep the hw from sleeping too quickly
     // (If the user has set a longer timeout value that is respected)
@@ -560,18 +594,27 @@ void jade_camera_process_images(camera_process_fn_t fn, void* ctx, const bool sh
 
     // Remove the minimum idle timeout
     idletimer_set_min_timeout_secs(0);
+
+    // Return the camera activity pointer if caller requested it
+    if (act_out) {
+        *act_out = camera_config.camera_act;
+    }
 }
 
 #else // CONFIG_HAS_CAMERA
 
 void jade_camera_process_images(camera_process_fn_t fn, void* ctx, const bool show_ui, const char* text_label,
     const bool show_click_button, const qr_guide_type_t qr_guide_type, const char* help_url,
-    progress_bar_t* progress_bar)
+    progress_bar_t* progress_bar, gui_activity_t** act_out)
 {
     JADE_LOGW("No camera supported for this device");
-    const char* message[] = { "No camera detected" };
-    await_error_activity(message, 1);
+    if (act_out) {
+        *act_out = NULL;
+    }
+    await_error("No camera detected");
 }
+
+void camera_stop(void) {}
 
 #endif // CONFIG_HAS_CAMERA
 #endif // AMALGAMATED_BUILD

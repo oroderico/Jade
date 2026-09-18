@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <esp_efuse.h>
 #include <sodium/utils.h>
+#include <stdint.h>
 #include <string.h>
 
 bool show_ota_versions_activity(
@@ -19,7 +20,11 @@ bool show_ota_versions_activity(
 // The running firmware info, loaded at startup
 extern esp_app_desc_t running_app_info;
 
-const __attribute__((section(".rodata_custom_desc"))) esp_custom_app_desc_t custom_app_desc
+const
+#ifndef CONFIG_LIBJADE
+    __attribute__((section(".rodata_custom_desc")))
+#endif
+    esp_custom_app_desc_t custom_app_desc
     = { .version = 1, .board_type = JADE_OTA_BOARD_TYPE, .features = JADE_OTA_FEATURES, .config = JADE_OTA_CONFIG };
 
 static const char* ota_get_status_text(const ota_status_t status)
@@ -94,7 +99,7 @@ void handle_in_bin_data(void* ctx, uint8_t* data, const size_t rawsize)
 
     CborParser parser;
     CborValue value;
-    const CborError cberr = cbor_parser_init(data + 1, rawsize - 1, CborValidateBasic, &parser, &value);
+    const CborError cberr = cbor_parser_init(data + 1, rawsize - 1, 0, &parser, &value);
     JADE_ASSERT(cberr == CborNoError);
     JADE_ASSERT(rpc_request_valid(&value));
 
@@ -200,24 +205,23 @@ jade_ota_ctx_t* ota_init(jade_process_t* process, const bool is_delta)
         JADE_ASSERT(!keychain_has_temporary());
     }
 
-    size_t firmwaresize = 0;
-    size_t compressedsize = 0;
-    size_t uncompressedpatchsize = 0;
+    uint32_t firmwaresize = 0;
+    uint32_t compressedsize = 0;
+    uint32_t uncompressedpatchsize = 0;
 
-    if (!rpc_get_sizet("fwsize", &params, &firmwaresize) || !rpc_get_sizet("cmpsize", &params, &compressedsize)
+    if (!rpc_get_uint32("fwsize", &params, &firmwaresize) || !rpc_get_uint32("cmpsize", &params, &compressedsize)
         || firmwaresize <= compressedsize) {
         errmsg = "Bad filesize parameters";
         goto cleanup;
     }
     if (is_delta
-        && (!rpc_get_sizet("patchsize", &params, &uncompressedpatchsize) || uncompressedpatchsize <= compressedsize)) {
+        && (!rpc_get_uint32("patchsize", &params, &uncompressedpatchsize) || uncompressedpatchsize <= compressedsize)) {
         errmsg = "Bad delta filesize parameters";
         goto cleanup;
     }
 
     // Optional field indicating preference for rich reply data
-    bool extended_replies = false;
-    rpc_get_boolean("extended_replies", &params, &extended_replies);
+    const bool extended_replies = rpc_get_bool_or("extended_replies", &params, false);
 
     // Can accept either uploaded file data hash (legacy) or hash of the full/final firmware image (preferred)
     uint8_t expected_hash[SHA256_LEN];
@@ -249,11 +253,11 @@ jade_ota_ctx_t* ota_init(jade_process_t* process, const bool is_delta)
     JADE_WALLY_VERIFY(wally_hex_from_bytes(expected_hash, sizeof(expected_hash), &joctx->expected_hash_hexstr));
     joctx->ota_return_status = OTA_ERR_SETUP;
     joctx->expected_source = ota_source;
-    joctx->compressedsize = compressedsize;
+    joctx->compressedsize = (size_t)compressedsize;
     joctx->remaining_compressed = joctx->compressedsize;
-    joctx->uncompressedsize = is_delta ? uncompressedpatchsize : firmwaresize;
+    joctx->uncompressedsize = is_delta ? (size_t)uncompressedpatchsize : (size_t)firmwaresize;
     joctx->remaining_uncompressed = joctx->uncompressedsize;
-    joctx->firmwaresize = firmwaresize;
+    joctx->firmwaresize = (size_t)firmwaresize;
     joctx->fwwritten = 0;
     joctx->extended_replies = extended_replies;
     joctx->validated_confirmed = false;
@@ -387,23 +391,14 @@ error:
     } else {
         // Send error response to the ota_complete message.
         // If we didn't get an ota_complete, sets the reply id as "00".
-        jade_process_reject_message_ex(process->ctx, errcode, "Error completing OTA", (const uint8_t*)status_text,
+        jade_process_reject_message_ex(&process->ctx, errcode, "Error completing OTA", (const uint8_t*)status_text,
             strlen(status_text), buf, sizeof(buf));
     }
 
     // If the error is not 'did not start' or 'user declined', show an error screen
     if (joctx->ota_return_status != OTA_ERR_SETUP && joctx->ota_return_status != OTA_ERR_USERDECLINED) {
-        await_error_activity(&status_text, 1);
+        await_error(status_text);
     }
-}
-
-// NOTE: 'dest' is assumed to be at least as long as 'strlen(src)'
-static void to_lower(char* dest, const char* src)
-{
-    while (*src) {
-        *dest++ = tolower(*src++);
-    }
-    *dest = '\0';
 }
 
 void ota_user_validate(jade_ota_ctx_t* joctx, const uint8_t* uncompressed)
@@ -444,12 +439,14 @@ void ota_user_validate(jade_ota_ctx_t* joctx, const uint8_t* uncompressed)
 
     // 'Board Type' and 'Features' must match.
     // 'Config' is allowed to differ.
+    JADE_STATIC_ASSERT(sizeof(JADE_OTA_BOARD_TYPE) <= sizeof(custom_info->board_type));
     if (strcmp(JADE_OTA_BOARD_TYPE, custom_info->board_type)) {
         JADE_LOGE("Firmware board type mismatch %s %s", JADE_OTA_BOARD_TYPE, custom_info->board_type);
         joctx->ota_return_status = OTA_ERR_INVALIDFW;
         return;
     }
 
+    JADE_STATIC_ASSERT(sizeof(JADE_OTA_FEATURES) <= sizeof(custom_info->features));
     if (strcmp(JADE_OTA_FEATURES, custom_info->features)) {
         JADE_LOGE("Firmware features mismatch");
         joctx->ota_return_status = OTA_ERR_INVALIDFW;
@@ -457,22 +454,30 @@ void ota_user_validate(jade_ota_ctx_t* joctx, const uint8_t* uncompressed)
     }
 
     // User to confirm once new firmware version known and all checks passed
-    char current_config[sizeof(JADE_OTA_CONFIG)];
-    to_lower(current_config, JADE_OTA_CONFIG);
-    char current_version[sizeof(running_app_info.version) + sizeof(current_config) + 2];
-    int rc = snprintf(current_version, sizeof(current_version), "%s %s", running_app_info.version, current_config);
-    JADE_ASSERT(rc > 0 && rc < sizeof(current_version));
+    char current_ver[sizeof(running_app_info.version) + sizeof(JADE_OTA_CONFIG_LOWER) + 2];
+    int rc = snprintf(current_ver, sizeof(current_ver), "%s " JADE_OTA_CONFIG_LOWER, running_app_info.version);
+    JADE_ASSERT(rc > 0 && rc < sizeof(current_ver));
 
-    char new_config[sizeof(custom_info->config)];
-    to_lower(new_config, custom_info->config);
-    char new_version[sizeof(new_app_info->version) + sizeof(new_config) + 2];
-    rc = snprintf(new_version, sizeof(new_version), "%s %s", new_app_info->version, new_config);
-    JADE_ASSERT(rc > 0 && rc < sizeof(new_version));
+    char new_config[sizeof(custom_info->config) + 1];
+    for (size_t i = 0; i < sizeof(custom_info->config); ++i) {
+        new_config[i] = tolower((unsigned char)custom_info->config[i]);
+        if (!new_config[i]) {
+            break;
+        }
+    }
+    new_config[sizeof(new_config) - 1] = '\0';
+    char new_version[sizeof(new_app_info->version) + 1];
+    memcpy(new_version, new_app_info->version, sizeof(new_app_info->version));
+    new_version[sizeof(new_version) - 1] = '\0';
+
+    char new_ver[sizeof(new_version) + sizeof(new_config) + 2];
+    rc = snprintf(new_ver, sizeof(new_ver), "%s %s", new_version, new_config);
+    JADE_ASSERT(rc > 0 && rc < sizeof(new_ver));
 
     const bool full_fw_hash = joctx->hash_type == HASHTYPE_FULLFWDATA;
 
     // Ask user to confirm
-    if (!show_ota_versions_activity(current_version, new_version, joctx->expected_hash_hexstr, full_fw_hash)) {
+    if (!show_ota_versions_activity(current_ver, new_ver, joctx->expected_hash_hexstr, full_fw_hash)) {
         JADE_LOGW("User declined ota firmware version");
         joctx->ota_return_status = OTA_ERR_USERDECLINED;
         return;

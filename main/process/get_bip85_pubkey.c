@@ -19,8 +19,8 @@ void get_bip85_pubkey_process(void* process_ptr)
     GET_MSG_PARAMS(process);
 
     const char* errmsg = NULL;
-    size_t key_bits = 0;
-    size_t index = 0;
+    uint32_t key_bits = 0;
+    uint32_t index = 0;
 
     if (!params_get_bip85_rsa_key(&params, &key_bits, &index, &errmsg)) {
         jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
@@ -37,7 +37,7 @@ void get_bip85_pubkey_process(void* process_ptr)
 
     // Reply with the pubkey pem
     uint8_t buf[1024];
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), pubkey_pem, cbor_result_string_cb);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), pubkey_pem, cbor_result_string_cb);
     JADE_LOGI("Success");
 
 cleanup:

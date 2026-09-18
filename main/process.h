@@ -12,6 +12,8 @@
 
 #include <cbor.h>
 
+#include "jade_assert.h"
+
 // This should be the size of the largest valid input message.
 // Used by ble and serial when reading data in. (sign-liquid-txn)
 // NOTE: limited to 17k when SPIRAM not enabled.
@@ -44,7 +46,17 @@ typedef void (*inbound_message_reader_fn_t)(void*, uint8_t*, size_t);
 // Callback to write messages to the outbound destination
 typedef bool (*outbound_message_writer_fn_t)(const uint8_t*, size_t, void*);
 
-typedef enum { SOURCE_NONE, SOURCE_INTERNAL, SOURCE_SERIAL, SOURCE_QEMU_TCP, SOURCE_BLE } jade_msg_source_t;
+typedef enum {
+    SOURCE_NONE,
+    SOURCE_INTERNAL,
+    SOURCE_SERIAL,
+    SOURCE_QEMU_TCP,
+    SOURCE_BLE
+#ifdef CONFIG_LIBJADE
+    ,
+    SOURCE_LIBJADE
+#endif
+} jade_msg_source_t;
 
 typedef struct {
     CborValue value;
@@ -65,7 +77,7 @@ typedef struct {
 } bytes_info_t;
 
 const char* get_jade_id(void);
-bool jade_process_init(
+WARN_UNUSED_RESULT bool jade_process_init(
     TaskHandle_t** serial_handle, TaskHandle_t** ble_handle, TaskHandle_t** qemu_tcp_handle, TaskHandle_t** gui_handle);
 
 // Intialise and cleanup jade process structs
@@ -83,23 +95,23 @@ void jade_process_transfer_current_message(jade_process_t* process, jade_process
 void jade_process_free_current_message(jade_process_t* process);
 
 // Push messages to/from a process
-bool jade_process_push_in_message(const uint8_t* data, size_t size);
-bool jade_process_push_in_message_ex(const uint8_t* data, size_t size, jade_msg_source_t source);
+WARN_UNUSED_RESULT bool jade_process_push_in_message(const uint8_t* data, size_t size);
 void jade_process_push_out_message(const uint8_t* data, size_t length, jade_msg_source_t source);
 
 // Send message replies
 void jade_process_reply_to_message_result_with_id(const char* id, uint8_t* output, size_t output_size,
     jade_msg_source_t source, const void* cbctx, cbor_encoder_fn_t cb);
 void jade_process_reply_to_message_result(
-    cbor_msg_t ctx, uint8_t* output, size_t output_size, const void* cbctx, cbor_encoder_fn_t cb);
+    const cbor_msg_t* const ctx, uint8_t* output, size_t output_size, const void* cbctx, cbor_encoder_fn_t cb);
+void jade_process_reply_to_message_ok_ex(const cbor_msg_t* const ctx);
 void jade_process_reply_to_message_ok(jade_process_t* process);
 void jade_process_reply_to_message_fail(jade_process_t* process);
 void jade_process_reply_to_message_ex(jade_msg_source_t source, const uint8_t* reply_payload, size_t payload_len);
 void jade_process_reject_message(jade_process_t* process, int code, const char* message);
 void jade_process_reject_message_with_id(const char* id, int code, const char* message, const uint8_t* data,
     size_t datalen, uint8_t* buffer, size_t buffer_len, jade_msg_source_t source);
-void jade_process_reject_message_ex(cbor_msg_t ctx, int code, const char* message, const uint8_t* data, size_t datalen,
-    uint8_t* buffer, size_t buffer_len);
+void jade_process_reject_message_ex(const cbor_msg_t* const ctx, int code, const char* message, const uint8_t* data,
+    size_t datalen, uint8_t* buffer, size_t buffer_len);
 
 // Get in/out messages from the queues/ring-buffers
 void jade_process_get_in_message(void* ctx, inbound_message_reader_fn_t reader, bool blocking);
@@ -111,8 +123,8 @@ void cbor_result_string_cb(const void* ctx, CborEncoder* container);
 void cbor_result_boolean_cb(const void* ctx, CborEncoder* container);
 void cbor_result_uint64_cb(const void* ctx, CborEncoder* container);
 
-void jade_process_reply_to_message_bytes(cbor_msg_t ctx, const uint8_t* data, size_t datalen);
-void jade_process_reply_to_message_bytes_sequence(cbor_msg_t ctx, const size_t seqnum, const size_t seqlen,
+void jade_process_reply_to_message_bytes(const cbor_msg_t* const ctx, const uint8_t* data, size_t datalen);
+void jade_process_reply_to_message_bytes_sequence(const cbor_msg_t* const ctx, const size_t seqnum, const size_t seqlen,
     const uint8_t* data, const size_t datalen, uint8_t* buffer, const size_t buflen);
 
 #endif /* PROCESS_H_ */

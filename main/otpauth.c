@@ -15,6 +15,7 @@
 #include <mbedtls/md.h>
 #include <pb_decode.h>
 
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -56,7 +57,13 @@ bool otp_is_valid(const otpauth_ctx_t* otp_ctx)
 
     // Optional fields
     OTP_CHECK_BOOL_RETURN(!otp_ctx->label_len || otp_ctx->label);
+    if (otp_ctx->label_len) {
+        OTP_CHECK_BOOL_RETURN(is_valid_urlencoding(otp_ctx->label, otp_ctx->label_len, OTP_MAX_LABEL_LEN, isprint));
+    }
     OTP_CHECK_BOOL_RETURN(!otp_ctx->issuer_len || otp_ctx->issuer);
+    if (otp_ctx->issuer_len) {
+        OTP_CHECK_BOOL_RETURN(is_valid_urlencoding(otp_ctx->issuer, otp_ctx->issuer_len, OTP_MAX_NAME_LEN, isprint));
+    }
 
     return true;
 }
@@ -176,33 +183,23 @@ bool otp_uri_to_ctx(const char* uri, size_t uri_len, otpauth_ctx_t* otp_ctx)
 
     // Get counter(hotp) or period(totp)
     if (otp_ctx->type_len == 4 && !strncmp("hotp", otp_ctx->type, otp_ctx->type_len)) {
-        otp_ctx->otp_type = OTPTYPE_HOTP;
-
         // 'counter' is mandatory for hotp
         OTP_CHECK_BOOL_RETURN(get_query_argument(query, query_len, "counter", &tmp, &tmp_len));
-        OTP_CHECK_BOOL_RETURN(tmp && tmp_len > 0 && tmp_len <= 20);
-
-        // Needs copying to nul-terminated buffer before converting
-        char buf[20];
-        memcpy(buf, tmp, tmp_len);
-        buf[tmp_len] = '\0';
-        otp_ctx->counter = strtoull(buf, NULL, 10);
+        OTP_CHECK_BOOL_RETURN(tmp && tmp_len > 0);
+        OTP_CHECK_BOOL_RETURN(parse_uint64(tmp, tmp_len, &otp_ctx->counter));
+        otp_ctx->otp_type = OTPTYPE_HOTP;
     } else if (otp_ctx->type_len == 4 && strncmp("totp", otp_ctx->type, otp_ctx->type_len) == 0) {
-        otp_ctx->otp_type = OTPTYPE_TOTP;
-
         // Period can be specified, but defaults to 30s
         get_query_argument(query, query_len, "period", &tmp, &tmp_len);
         if (!tmp) {
             otp_ctx->period = 30;
         } else {
-            OTP_CHECK_BOOL_RETURN(tmp_len > 0 && tmp_len <= 3);
-
-            // Needs copying to nul-terminated buffer before converting
-            char buf[4];
-            memcpy(buf, tmp, tmp_len);
-            buf[tmp_len] = '\0';
-            otp_ctx->period = strtoul(buf, NULL, 10);
+            uint64_t value64;
+            OTP_CHECK_BOOL_RETURN(parse_uint64(tmp, tmp_len, &value64));
+            OTP_CHECK_BOOL_RETURN(value64 <= 0xff);
+            otp_ctx->period = value64 & 0xff;
         }
+        otp_ctx->otp_type = OTPTYPE_TOTP;
     } else {
         JADE_LOGE("Unknown OTP type: %.*s", otp_ctx->type_len, otp_ctx->type);
         return false;
@@ -234,7 +231,7 @@ static bool otp_migrate_url_to_data(const char* uri, size_t uri_len, uint8_t** d
     OTP_CHECK_BOOL_RETURN(http_parser_parse_url(uri, uri_len, 0, &u) == 0);
 
     if (u.field_data[UF_SCHEMA].len != 9
-        || strncmp(OTP_MIGRATE_SCHEMA + OTP_MIGRATE_SCHEMA_OFFSET, uri + u.field_data[UF_SCHEMA].off,
+        || strncmp((const char*)OTP_MIGRATE_SCHEMA + OTP_MIGRATE_SCHEMA_OFFSET, uri + u.field_data[UF_SCHEMA].off,
             u.field_data[UF_SCHEMA].len)) {
         JADE_LOGE("otp migrate uri missing expected " OTP_MIGRATE_SCHEMA_FULL " schema");
         return false;

@@ -2,28 +2,28 @@ Run the following:
 
 ```docker build . -t local_jade```
 
-The above creates the docker image with all the required dependencies. You can also look into fetching instead blockstream/verde with
-```docker pull blockstream/verde```
+The above creates the docker image with all the required dependencies. You can also look into fetching instead blockstream/jade_builder with (or see https://hub.docker.com/r/blockstream/jade_builder/tags for recent images)
+```docker pull blockstream/jade_builder@sha256:8b739db85b6b99664db0e3ece57cddfa4e0fee4101a20ca930c391273f21e2f9```
 
 You can then tag this as local_jade with
 
-```docker tag blockstream/verde local_jade```
+```docker tag blockstream/jade_builder@sha256:8b739db85b6b99664db0e3ece57cddfa4e0fee4101a20ca930c391273f21e2f9 local_jade```
 
 At this point we are ready to build and run Jade in qemu with the following:
 
-```cp configs/sdkconfig_qemu_psram_webdisplay.defaults sdkconfig.defaults```
+```./tools/switch_to.sh qemu --dev --psram --webdisplay```
 
 ```idf.py build```
 
 After this the build files are ready and you can modify at any time any of the files and reissue the previous and then the following command:
 
-```docker run --rm -v $PWD:/jade -p 127.0.0.1:30121:30121/tcp -p 127.0.0.1:30122:30122/tcp local_jade /bin/bash -c "cd /jade && ./main/qemu/make-flash-img.sh && ./main/qemu/qemu_run.sh"```
+```docker run --rm -v $PWD:/jade -p 127.0.0.1:30121:30121/tcp -p 127.0.0.1:30122:30122/tcp local_jade /bin/bash -c "cd /jade && ./main/qemu/make_flash_img.sh && ./main/qemu/qemu_run.sh"```
 
 This will start the docker image, open the port 30121 to talk to Jade via tcp and 30122 to show the display on a webpage.
 
-If you do not have idf.py configured/installed you can also try with:
+If you do not have idf.py configured/installed you can also try the ```run_emulator.sh``` script which will automate the process of building the jade firmware in docker also:
 
-```docker run --rm -v $PWD:/jade -p 127.0.0.1:30121:30121/tcp -p 127.0.0.1:30122:30122/tcp local_jade /bin/bash -c "cd /jade && rm -fr sdkconfig sdkconfig.defaults build && cp configs/sdkconfig_qemu_psram_webdisplay.defaults sdkconfig.defaults && rm -fr build sdkconfig && . /root/esp/esp-idf/export.sh && idf.py build && ./main/qemu/make-flash-img.sh && ./main/qemu/qemu_run.sh"```
+```./main/qemu/run_emulator.sh```
 
 
 Potential additions:

@@ -264,6 +264,31 @@ static bool parse_descriptor(const char* name, const descriptor_data_t* descript
         goto fail;
     }
 
+    const bool is_liquid = network_id != NETWORK_NONE && network_is_liquid(network_id);
+    if (is_liquid || (features & WALLY_MS_ANY_BLINDING_KEY)) {
+        if (!descriptor_allow_liquid()) {
+            // TODO: remove this check once liquid descriptors are enabled
+            JADE_LOGE("Descriptor '%s' appears to be for liquid network, but liquid descriptors are disabled", name);
+            *errmsg = "Descriptor wallets not supported on liquid network";
+            goto fail;
+        }
+        if (is_liquid) {
+            // Only ct(slip77(),<expression>) currently supported for Liquid.
+            // TODO: Add support for other blinding key types (ELIP-150, ELIP-151).
+            if (!(features & WALLY_MS_IS_SLIP77)) {
+                JADE_LOGE("Descriptor '%s' appears to be a non-ct/non-slip77 descriptor", name);
+                *errmsg = "Descriptor must use slip77 blinding for liquid network";
+                goto fail;
+            }
+        } else if (network_id != NETWORK_NONE) {
+            if (features & WALLY_MS_ANY_BLINDING_KEY) {
+                JADE_LOGE("Descriptor '%s' appears to be confidential", name);
+                *errmsg = "Descriptor must not be confidential for bitcoin network";
+                goto fail;
+            }
+        }
+    }
+
     // Return the descriptor
     *output = d;
     return true;
@@ -273,16 +298,33 @@ fail:
     return false;
 }
 
-// NOTE: signers should either be sufficient to hold details for all signers, or NULL if
-// the only value of interest is the number of signers in the descriptor.
+bool descriptor_allow_liquid(void)
+{
+// Currently only available in debug builds or if explicitly enabled
+// by defining LIQUID_DESCRIPTORS when building.
+#if defined(LIQUID_DESCRIPTORS) || defined(CONFIG_DEBUG_MODE)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Parse the descriptor and get signer information
+// If `signers` is NULL then only the number of signers is returned in `written` (and `blinding_key` is ignored).
+// If `blinding_key` is non-NULL, then the blinding key hex value is returned (if present in descriptor)
+//    - caller must free the blinding key with wally_free_string().
 bool descriptor_get_signers(const char* name, const descriptor_data_t* descriptor, const network_t network_id,
-    descriptor_type_t* deduced_type, signer_t* signers, const size_t signers_len, size_t* written, const char** errmsg)
+    descriptor_type_t* deduced_type, signer_t* signers, size_t signers_len, size_t* written, char** blinding_key,
+    const char** errmsg)
 {
     JADE_ASSERT(name);
     JADE_ASSERT(descriptor);
     JADE_ASSERT(!deduced_type || *deduced_type == DESCRIPTOR_TYPE_UNKNOWN);
     JADE_ASSERT(!signers == !signers_len); // both or neither
     JADE_INIT_OUT_SIZE(written);
+    if (blinding_key) {
+        JADE_INIT_OUT_PPTR(blinding_key);
+    }
     JADE_INIT_OUT_PPTR(errmsg);
 
     bool retval = false;
@@ -372,10 +414,28 @@ bool descriptor_get_signers(const char* name, const descriptor_data_t* descripto
             *errmsg = "Failed to get child path string";
             goto cleanup;
         }
+        const size_t child_path_len = strlen(str);
+        JADE_ASSERT(child_path_len < sizeof(signer->path_str));
         strcpy(signer->path_str, str);
-        signer->path_len = strlen(str);
+        signer->path_len = child_path_len;
         signer->path_is_string = true;
         JADE_WALLY_VERIFY(wally_free_string(str));
+    }
+
+    if (blinding_key) {
+        uint32_t features = 0;
+        if (wally_descriptor_get_features(d, &features) != WALLY_OK) {
+            *errmsg = "Failed to inspect descriptor features";
+            goto cleanup;
+        }
+
+        // Check if descriptor has SLIP77 blinding key before attempting to fetch it
+        if (features & WALLY_MS_IS_SLIP77) {
+            if (wally_descriptor_get_key(d, WALLY_MS_BLINDING_KEY_INDEX, blinding_key) != WALLY_OK || !*blinding_key) {
+                *errmsg = "Failed to get blinding key from descriptor";
+                goto cleanup;
+            }
+        }
     }
 
     // Return the number of signers written
@@ -603,7 +663,7 @@ bool descriptor_from_bytes(const uint8_t* bytes, const size_t bytes_len, descrip
 
     // Descriptor script
     memcpy(&descriptor->script_len, read_ptr, sizeof(descriptor->script_len));
-    if (descriptor->script_len > sizeof(descriptor->script)) {
+    if (descriptor->script_len >= sizeof(descriptor->script)) {
         JADE_LOGE("Bad script_len stored registered descriptor data");
         return false;
     }
@@ -614,13 +674,17 @@ bool descriptor_from_bytes(const uint8_t* bytes, const size_t bytes_len, descrip
 
     // Any data values
     memcpy(&descriptor->num_values, read_ptr, sizeof(descriptor->num_values));
+    if (descriptor->num_values > MAX_ALLOWED_SIGNERS) {
+        JADE_LOGE("Bad num_values in stored registered descriptor data");
+        return false;
+    }
     read_ptr += sizeof(descriptor->num_values);
 
     for (uint8_t i = 0; i < descriptor->num_values; ++i) {
         string_value_t* const map_entry = descriptor->values + i;
 
         memcpy(&map_entry->key_len, read_ptr, sizeof(map_entry->key_len));
-        if (map_entry->key_len > sizeof(map_entry->key)) {
+        if (map_entry->key_len >= sizeof(map_entry->key)) {
             JADE_LOGE("Bad key_len stored registered descriptor data");
             return false;
         }
@@ -630,7 +694,7 @@ bool descriptor_from_bytes(const uint8_t* bytes, const size_t bytes_len, descrip
         read_ptr += map_entry->key_len;
 
         memcpy(&map_entry->value_len, read_ptr, sizeof(map_entry->value_len));
-        if (map_entry->value_len > sizeof(map_entry->value)) {
+        if (map_entry->value_len >= sizeof(map_entry->value)) {
             JADE_LOGE("Bad value_len stored registered descriptor data");
             return false;
         }
@@ -657,23 +721,14 @@ bool descriptor_load_from_storage(const char* descriptor_name, descriptor_data_t
     if (!storage_get_descriptor_registration(
             descriptor_name, registration, MAX_DESCRIPTOR_BYTES_LEN, &registration_len)) {
         *errmsg = "Cannot find named descriptor wallet";
-        free(registration);
-        return false;
-    }
-
-    if (!descriptor_from_bytes(registration, registration_len, output)) {
+    } else if (!descriptor_from_bytes(registration, registration_len, output)) {
         *errmsg = "Cannot de-serialise descriptor wallet data";
-        free(registration);
-        return false;
-    }
-
-    // Sanity check data we are have loaded
-    if (output->script_len > sizeof(output->script) || output->num_values > MAX_ALLOWED_SIGNERS) {
-        *errmsg = "Descriptor wallet data invalid";
+    } else if (output->script_len > sizeof(output->script) || output->num_values > MAX_ALLOWED_SIGNERS) {
+        *errmsg = "Descriptor wallet data invalid"; // Failed sanity checks
     }
 
     free(registration);
-    return true;
+    return *errmsg == NULL;
 }
 
 // Get the registered descriptor record names

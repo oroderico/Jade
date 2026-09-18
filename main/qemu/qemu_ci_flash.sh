@@ -28,26 +28,29 @@ qemu-system-xtensa -nographic \
     -nic user,model=open_eth,id=lo0,hostfwd=tcp:0.0.0.0:30121-:30121 \
     -drive file=/qemu_efuse.bin,if=none,format=raw,id=efuse \
     -global driver=nvram.esp32.efuse,property=drive,value=efuse \
-    -serial pty &
+    -serial file:serial_output.log &
 
 sleep 4
 
 git submodule update --init --depth 1 pinserver
 pip install --require-hashes -r requirements.txt -r pinserver/requirements.txt
+pip install pytest
 
 # Build the bsdiff tool in the 'tools' directory (source file in the build dir)
 gcc -O2 -DBSDIFF_EXECUTABLE -o ./tools/bsdiff build/bsdiff.c
 
 # OTA the build firmware
 # NOTE: tools/fwprep.py should have run in the build step and produced the compressed firmware file
+OTA_ARGS="--log=INFO --skipble --serialport=tcp:localhost:30121 --serialtimeout=900"
 FW_FULL=$(ls build/*_fw.bin)
-python jade_ota.py --log=INFO --skipble --serialport=tcp:localhost:30121 --fwfile=${FW_FULL}
+python jade_ota.py ${OTA_ARGS} --fwfile=${FW_FULL}
 
 # Flash a simple patch-to-self, just to smoke test ota-delta
 ./tools/mkpatch.py ${FW_FULL} ${FW_FULL} build/ --force
 FW_PATCH=$(ls ./build/*_patch.bin)
 cp "${FW_FULL}.hash" "${FW_PATCH}.hash"
-python jade_ota.py --log=INFO --skipble --serialport=tcp:localhost:30121 --fwfile=${FW_PATCH}
+python jade_ota.py ${OTA_ARGS} --fwfile=${FW_PATCH}
 
 # Run the tests - long timeout for bcur-fragment iteration test in 'run_remote_selfcheck()/selfcheck.c'
-python test_jade.py --log=INFO --skipble --qemu --serialport=tcp:localhost:30121 --serialtimeout=900
+python test_jade.py --log=INFO --skipble --qemu --serialport=tcp:localhost:30121 --serialtimeout=900 $*
+pytest -v --no-legacy-flow --device tcp:localhost:30121 --timeout 900 tests/

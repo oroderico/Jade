@@ -59,6 +59,18 @@ void sync_wait_event_handler(void* handler_arg, esp_event_base_t base, int32_t i
     xSemaphoreGive(data->triggered);
 }
 
+#ifdef CONFIG_LIBJADE
+extern volatile bool _libjade_stop_requested;
+// Handle of the semaphore currently being waited on, so libjade_stop() can unblock the wait.
+static volatile SemaphoreHandle_t _last_wait_handle = NULL;
+void _trigger_last_wait_handle(void)
+{
+    if (_last_wait_handle) {
+        xSemaphoreGive(_last_wait_handle);
+    }
+}
+#endif
+
 // This function waits for a previously registered event to be triggered.
 // NOTE: DOES NOT register any event handler - assumes one is already registered and the
 // passed 'wait_event_data_t' instance should contain the relevant registration data.
@@ -69,6 +81,13 @@ esp_err_t sync_wait_event(wait_event_data_t* wait_event_data, esp_event_base_t* 
 {
     JADE_ASSERT(wait_event_data);
 
+#ifdef CONFIG_LIBJADE
+    if (_libjade_stop_requested) {
+        pthread_exit(NULL);
+    }
+    _last_wait_handle = wait_event_data->triggered;
+#endif
+
     JADE_LOGD("Awaiting event %p (timeout = %lu)", wait_event_data, max_wait);
     if (!max_wait) {
         while (xSemaphoreTake(wait_event_data->triggered, portMAX_DELAY) != pdTRUE) {
@@ -76,10 +95,20 @@ esp_err_t sync_wait_event(wait_event_data_t* wait_event_data, esp_event_base_t* 
         }
     } else {
         if (xSemaphoreTake(wait_event_data->triggered, max_wait) != pdTRUE) {
+#ifdef CONFIG_LIBJADE
+            _last_wait_handle = NULL;
+#endif
             JADE_LOGD("Event %p timed-out", wait_event_data);
             return ESP_NO_EVENT;
         }
     }
+
+#ifdef CONFIG_LIBJADE
+    _last_wait_handle = NULL;
+    if (_libjade_stop_requested) {
+        pthread_exit(NULL);
+    }
+#endif
 
     // ESP_OK means the event was fired, so copy the ids into the output params
     JADE_LOGD("Event %p received in waiting task", wait_event_data);

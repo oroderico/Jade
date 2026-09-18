@@ -39,7 +39,11 @@ target_include_directories(otpauth_migrate_target PUBLIC "${OTPAUTH_MIGRATE_SOUR
 set(OTPAUTH_MIGRATE_INCLUDE_DIR "${OTPAUTH_MIGRATE_SOURCE_DIR}")
 
 # Note -DVERIFY enables (expensive) libsecp256k1 verification
-set(CMAKE_C_FLAGS_DEBUG "-O0 -ggdb3 -DVERIFY -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection")
+set(CMAKE_C_FLAGS_DEBUG "-O0 -ggdb3 -DVERIFY -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -fstack-protector-strong")
+# TODO: remove this when Clang gets a stable support for stack clash protection on MacOS
+if(NOT APPLE)
+    string(APPEND CMAKE_C_FLAGS_DEBUG " -fstack-clash-protection")
+endif()
 
 # FIXME: revisit what flags we want in release/production
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
@@ -52,6 +56,23 @@ endif()
 option(LOG "Enable libjade logging" OFF)
 if (NOT LOG)
     add_compile_options(-DCONFIG_LOG_DEFAULT_LEVEL_NONE)
+endif()
+
+option(COVERAGE "Enable libjade profile coverage" OFF)
+if (COVERAGE)
+    add_compile_options(-fprofile-arcs -ftest-coverage)
+    add_link_options(-lgcov --coverage)
+endif()
+
+# CI mode defaults to ON since libjade is typically used for testing
+option(CI "Enable CI (auto-click) mode" ON)
+if (CI)
+    add_compile_options(-DCONFIG_DEBUG_UNATTENDED_CI)
+endif()
+
+option(CAMERA "Enable libjade camera support" OFF)
+if (CAMERA)
+    add_compile_options(-DCONFIG_LIBJADE_CAMERA)
 endif()
 
 set(CMAKE_C_VISIBILITY_PRESET hidden)
@@ -102,6 +123,14 @@ set_source_files_properties(libjade.c PROPERTIES COMPILE_OPTIONS
   "-Wall;-W;-Wno-format;-Wno-unused-function;-Wno-unused-parameter;-Wno-sign-compare;-Wno-missing-field-initializers;-Wno-narrowing")
 target_compile_definitions(jade PRIVATE LIBJADE_BUILD)
 
+# libjade selfcheck overrides - used for internal firmware unit tests.
+# build with -DSELFCHECK=<test> to link libjade/selfcheck/<test>.c
+# Note SELFCHECK is ignored for daemon builds.
+set(SELFCHECK "" CACHE STRING "Link a given debug_selfcheck implementation for testing")
+if(NOT "${SELFCHECK}" STREQUAL "")
+    target_compile_definitions(jade PRIVATE SELFCHECK=${SELFCHECK})
+endif()
+
 # libjade.a
 add_library(jade_static STATIC ${COMMON_SRC})
 target_link_libraries(jade_static PRIVATE m z mbedtls mbedcrypto mbedx509 bcur)
@@ -128,3 +157,7 @@ add_custom_command(OUTPUT asset_data_testnet.inc
 add_custom_target(asset_data DEPENDS asset_data.inc asset_data_testnet.inc)
 add_dependencies(jade asset_data)
 add_dependencies(jade_static asset_data)
+
+target_compile_options(jade PRIVATE -Werror=unused-result)
+target_compile_options(jade_static PRIVATE -Werror=unused-result)
+target_compile_options(libjade_daemon PRIVATE -Werror=unused-result)

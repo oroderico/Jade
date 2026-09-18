@@ -38,11 +38,13 @@ typedef struct {
 
 // digit entry
 #define DIGIT_ENTRY_SIZE 6
+#define DIGIT_ENTRY_WORD_NUMBER_SIZE 4
 
 enum __attribute__((__packed__)) digit_entry_type {
     DIGIT_ENTRY_INVALID = 0,
     DIGIT_ENTRY_PIN,
     DIGIT_ENTRY_INDEX,
+    DIGIT_ENTRY_WORD_NUMBER,
 };
 
 enum __attribute__((__packed__)) digit_entry_initial_state { RANDOM, ZERO, POSITION };
@@ -64,6 +66,8 @@ typedef struct {
     const enum digit_entry_type entry_type;
     const enum digit_entry_initial_state initial_state;
     const bool digits_shown;
+    const uint8_t max_digits; // Zero uses DIGIT_ENTRY_SIZE.
+    const uint32_t max_value; // Zero leaves the numeric value unbounded.
 
     uint8_t digit[DIGIT_ENTRY_SIZE];
     enum digit_entry_status digit_status[DIGIT_ENTRY_SIZE];
@@ -84,11 +88,16 @@ typedef struct {
 // Whether QR Frame Guides (box corners) should be shown
 typedef enum { QR_GUIDE_HIDE, QR_GUIDE_SHOW } qr_guide_type_t;
 
-#define OUTPUT_FLAG_CONFIDENTIAL 1
-#define OUTPUT_FLAG_HAS_BLINDING_KEY 2
-#define OUTPUT_FLAG_VALIDATED 4
-#define OUTPUT_FLAG_CHANGE 8
-#define OUTPUT_FLAG_HAS_UNBLINDED 16
+// Output is confidential/blinded
+#define OUTPUT_FLAG_CONFIDENTIAL (1 << 0)
+// Output has a blinding public key
+#define OUTPUT_FLAG_HAS_BLINDING_KEY (1 << 1)
+// Output is ours (belongs to a wallet controlled by this Jade)
+#define OUTPUT_FLAG_IS_OURS (1 << 2)
+// Output is a change output for this wallet (only set with OUTPUT_FLAG_IS_OURS)
+#define OUTPUT_FLAG_CHANGE (1 << 3)
+// Output has unblinded asset and value
+#define OUTPUT_FLAG_HAS_UNBLINDED (1 << 4)
 
 // Progress bar
 typedef struct {
@@ -147,8 +156,13 @@ gui_activity_t* display_message_activity(const char* message[], size_t message_s
 gui_activity_t* display_processing_message_activity();
 
 // Run activity that displays a message and awaits an 'ack' button click
-void await_message_activity(const char* message[], size_t message_size);
-void await_error_activity(const char* message[], size_t message_size);
+void await_message(const char* msg);
+void await_message_2(const char* msg1, const char* msg2);
+void await_message_3(const char* msg1, const char* msg2, const char* msg3);
+void await_message_4(const char* msg1, const char* msg2, const char* msg3, const char* msg4);
+void await_error(const char* msg);
+void await_error_2(const char* msg1, const char* msg2);
+void await_error_3(const char* msg1, const char* msg2, const char* msg3);
 
 // Activity that displays a message and awaits a 'Yes'/'Continue' or 'No'/'Skip'/'Back' event
 bool await_yesno_activity(

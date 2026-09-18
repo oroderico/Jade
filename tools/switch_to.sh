@@ -101,8 +101,8 @@ fi
 
 if [ "$CONFIG" = "qemu" ]; then
     # QEMU
-    if [ -n "$NORADIO" ] || [ -n "$LOG" ] || [ -n "$DEBUG" ] || [ -n "$JTAG" ]; then
-        usage "--[noradio|log|log-cbor|log-wifi|debug|jtag] must not be given for qemu"
+    if [ -n "$NORADIO" ] || [ "$LOG" = "wifi" ] || [ -n "$DEBUG" ] || [ -n "$JTAG" ]; then
+        usage "--[noradio|log-wifi|debug|jtag] must not be given for qemu"
     elif [ -n "$WEBDISPLAY" ] && [ -z "$PSRAM" ]; then
         usage "--[webdisplay|webdisplay-larger] require --psram"
     fi
@@ -124,7 +124,7 @@ else
     if [ "$CONFIG" = "qemu" ]; then
         usage "--dev must be given for qemu"
     fi
-    CONFIG_FILE="./production/sdkconfig_${CONFIG}_prod.defaults"
+    CONFIG_FILE="./configs/production/sdkconfig_${CONFIG}_prod.defaults"
 fi
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "error: config file $CONFIG_FILE does not exist" >&2
@@ -223,6 +223,10 @@ elif [ "$LOG" = "wifi" ]; then
     read -r -p "Enter socket server PORT [8888]: " PORT
     set_config CONFIG_WIFI_LOGGER_PORT ${PORT:-8888}
     LOG="uart" # Enable UART logging below
+    if [ $ARCH = "esp32" ]; then
+        #  On ESP32 we run out of IRAM with WIFI logging enabled
+        set_config CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH y
+    fi
 fi
 if [ "$LOG" = "uart" ]; then
     echo "updating config file for UART logging ..."
@@ -239,8 +243,8 @@ if [ -n "$JTAG" ]; then
     fi
     echo "updating config file for JTAG support ..."
     set_config CONFIG_JADE_USE_USB_JTAG_SERIAL y
-    set_config CONFIG_NEWLIB_STDIN_LINE_ENDING_LF y
-    set_config CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF y
+    set_config CONFIG_LIBC_STDIN_LINE_ENDING_LF y
+    set_config CONFIG_LIBC_STDOUT_LINE_ENDING_LF y
 fi
 if [ -n "$PSRAM" ]; then
     echo "updating config file for PSRAM support ..."
@@ -248,7 +252,6 @@ if [ -n "$PSRAM" ]; then
     remove_config CONFIG_ESP_WIFI_STATIC_TX_BUFFER
     remove_config CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM
     # add settings
-    set_config CONFIG_ESP_INT_WDT_TIMEOUT_MS 300
     set_config CONFIG_SPIRAM y
     set_config CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY y
     set_config CONFIG_SPIRAM_BANKSWITCH_ENABLE n
@@ -259,16 +262,13 @@ if [ -n "$PSRAM" ]; then
         remove_config CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT
         remove_config CONFIG_DEBUG_UNATTENDED_CI
         remove_config CONFIG_ESP_ERR_TO_NAME_LOOKUP
-        remove_config CONFIG_ESP_INT_WDT_TIMEOUT_MS
         remove_config CONFIG_ESP_SYSTEM_CHECK_INT_LEVEL_5
-        remove_config CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT
         remove_config CONFIG_LWIP_IPV6
         remove_config CONFIG_LWIP_NETIF_LOOPBACK
         remove_config CONFIG_UART_ISR_IN_IRAM
         # add settings
         set_config CONFIG_ESP_BROWNOUT_DET n
         set_config CONFIG_ESP_INT_WDT n
-        set_config CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT y
         set_config CONFIG_HAS_CAMERA y
         set_config CONFIG_HTTPD_MAX_REQ_HDR_LEN 4096
         set_config CONFIG_HTTPD_WS_SUPPORT y

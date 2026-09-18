@@ -94,7 +94,7 @@ static bool return_image_data(const size_t width, const size_t height, const uin
     }
 
     // All good, reply with the compressed image data
-    jade_process_reply_to_message_bytes(info->process->ctx, compressed, compressed_len);
+    jade_process_reply_to_message_bytes(&info->process->ctx, compressed, compressed_len);
 
     // Free the input message (to signal that we have been called and sent the reply)
     jade_process_free_current_message(info->process);
@@ -116,7 +116,7 @@ void debug_capture_image_data_process(void* process_ptr)
 
     // Caller may want to restrict to images which contain a valid qr code
     bool check_qr = false;
-    const bool ret = rpc_get_boolean("check_qr", &params, &check_qr);
+    const bool ret = rpc_get_bool("check_qr", &params, &check_qr);
 
     // Launch the camera with the 'click' callback function set to
     // return the captured image data in the reply message
@@ -125,7 +125,7 @@ void debug_capture_image_data_process(void* process_ptr)
     image_capture_into_t info = { .process = process, .check_qr = ret && check_qr };
     const qr_guide_type_t qr_guide_type = check_qr ? QR_GUIDE_SHOW : QR_GUIDE_HIDE;
     jade_camera_process_images(
-        return_image_data, &info, show_camera_ui, NULL, show_click_button, qr_guide_type, NULL, NULL);
+        return_image_data, &info, show_camera_ui, NULL, show_click_button, qr_guide_type, NULL, NULL, NULL);
 
     // Send a 'user cancelled' error reply if the callback was not invoked
     // (We can detect as the callback frees the 'current message' on successful completion)
@@ -177,7 +177,7 @@ void debug_scan_qr_process(void* process_ptr)
     }
 
     // Reply with the decoded data (empty if failed)
-    jade_process_reply_to_message_bytes(process->ctx, qr_data.data, qr_data.len);
+    jade_process_reply_to_message_bytes(&process->ctx, qr_data.data, qr_data.len);
     JADE_LOGI("Success");
 
 cleanup:

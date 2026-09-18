@@ -1,4 +1,5 @@
 #ifndef AMALGAMATED_BUILD
+#include "driver/uart.h"
 #include "jade_assert.h"
 #include "process.h"
 #include "utils/cbor_rpc.h"
@@ -31,7 +32,10 @@ static int write_log_line(char* buf, int buf_len, const char* message, va_list f
 int serial_logger(const char* message, va_list fmt)
 {
     char buff[BUFFER_SIZE];
-    int written = write_log_line(buff, sizeof(buff), message, fmt);
+    const int written = write_log_line(buff, sizeof(buff), message, fmt);
+    if (written <= 0) {
+        return written;
+    }
 
     CborEncoder root_encoder;
     uint8_t cbor_buff[BUFFER_SIZE + LOG_CBOR_OVERHEAD];
@@ -60,9 +64,27 @@ int serial_logger(const char* message, va_list fmt)
 int wifi_socket_server_logger(const char* message, va_list fmt)
 {
     char buff[BUFFER_SIZE];
-    int written = write_log_line(buff, sizeof(buff), message, fmt);
+    const int written = write_log_line(buff, sizeof(buff), message, fmt);
 
-    socket_server_send(buff, written);
+    if (written > 0) {
+        socket_server_send(buff, written);
+    }
+
+    return written;
+}
+#endif
+
+#ifdef CONFIG_BOARD_TYPE_QEMU
+// TODO: I would have thought that this would be the default if
+// logging was enabled, perhaps we disabled it somewhere else?
+int qemu_uart0_logger(const char* message, va_list fmt)
+{
+    char buff[BUFFER_SIZE];
+    const int written = write_log_line(buff, sizeof(buff), message, fmt);
+
+    if (written > 0) {
+        uart_write_bytes(UART_NUM_0, buff, written);
+    }
 
     return written;
 }

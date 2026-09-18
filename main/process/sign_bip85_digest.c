@@ -1,5 +1,7 @@
 #ifndef AMALGAMATED_BUILD
 
+#include <inttypes.h>
+
 #include "../jade_assert.h"
 #include "../process.h"
 #include "../rsa.h"
@@ -37,8 +39,7 @@ static void reply_signatures(const void* ctx, CborEncoder* container)
 static void get_digests_allocate(
     const char* field, const CborValue* value, rsa_signing_digest_t** data, size_t* written)
 {
-    JADE_ASSERT(field);
-    JADE_ASSERT(value);
+    JADE_ASSERT(field && value);
     JADE_INIT_OUT_PPTR(data);
     JADE_INIT_OUT_SIZE(written);
 
@@ -62,26 +63,21 @@ static void get_digests_allocate(
     rsa_signing_digest_t* const digests = JADE_CALLOC(num_array_items, sizeof(rsa_signing_digest_t));
 
     for (size_t i = 0; i < num_array_items; ++i) {
-        JADE_ASSERT(!cbor_value_at_end(&arrayItem));
-        rsa_signing_digest_t* const digest = digests + i;
+        rsa_signing_digest_t* const p = digests + i;
+        size_t len;
 
-        const uint8_t* data = NULL;
-        size_t data_len = 0;
-        rpc_get_raw_bytes_ptr(&arrayItem, &data, &data_len);
-        if (!data || data_len != sizeof(digest->digest)) {
-            free(digests);
-            return;
+        if (cbor_value_at_end(&arrayItem) || !cbor_value_is_byte_string(&arrayItem)
+            || cbor_value_get_string_length(&arrayItem, &len) != CborNoError || len != sizeof(p->digest)
+            || cbor_value_copy_byte_string(&arrayItem, p->digest, &len, &arrayItem) != CborNoError
+            || len != sizeof(p->digest)) {
+            goto fail;
         }
-
-        memcpy(digest->digest, data, data_len);
-        digest->digest_len = data_len;
-
-        cberr = cbor_value_advance(&arrayItem);
-        JADE_ASSERT(cberr == CborNoError);
+        p->digest_len = len;
     }
 
     cberr = cbor_value_leave_container(&result, &arrayItem);
     if (cberr != CborNoError) {
+    fail:
         free(digests);
         return;
     }
@@ -101,8 +97,8 @@ void sign_bip85_digests_process(void* process_ptr)
     GET_MSG_PARAMS(process);
 
     const char* errmsg = NULL;
-    size_t key_bits = 0;
-    size_t index = 0;
+    uint32_t key_bits = 0;
+    uint32_t index = 0;
 
     if (!params_get_bip85_rsa_key(&params, &key_bits, &index, &errmsg)) {
         jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
@@ -137,9 +133,9 @@ void sign_bip85_digests_process(void* process_ptr)
         ret = snprintf(buf1, sizeof(buf1), "Sign passed digest");
     }
     JADE_ASSERT(ret > 0 && ret < sizeof(buf1));
-    ret = snprintf(buf2, sizeof(buf2), "with %u-bit key", key_bits);
+    ret = snprintf(buf2, sizeof(buf2), "with %" PRIu32 "-bit key", key_bits);
     JADE_ASSERT(ret > 0 && ret < sizeof(buf2));
-    ret = snprintf(buf3, sizeof(buf3), "index: %u?", index);
+    ret = snprintf(buf3, sizeof(buf3), "index: %" PRIu32 "?", index);
     JADE_ASSERT(ret > 0 && ret < sizeof(buf3));
 
     const char* message[] = { buf1, buf2, buf3 };
@@ -164,7 +160,7 @@ void sign_bip85_digests_process(void* process_ptr)
     // Reply with signatures
     uint8_t buf[2304];
     const signatures_t result = { .signatures = signatures, .num_signatures = num_digests };
-    jade_process_reply_to_message_result(process->ctx, buf, sizeof(buf), &result, reply_signatures);
+    jade_process_reply_to_message_result(&process->ctx, buf, sizeof(buf), &result, reply_signatures);
     JADE_LOGI("Success");
 
 cleanup:

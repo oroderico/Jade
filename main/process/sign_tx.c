@@ -59,9 +59,8 @@ static struct wally_tx* params_txn(jade_process_t* process, const CborValue* par
     }
     jade_process_call_on_exit(process, jade_wally_free_tx_wrapper, tx);
 
-    size_t num_inputs = 0;
-    bool ret = rpc_get_sizet("num_inputs", params, &num_inputs);
-    if (!ret || num_inputs == 0) {
+    const uint32_t num_inputs = rpc_get_uint32_or("num_inputs", params, 0);
+    if (num_inputs == 0) {
         errmsg = "Failed to extract valid number of inputs from parameters";
         goto fail;
     }
@@ -124,21 +123,21 @@ static bool params_signing_outputs(jade_process_t* process, const CborValue* par
 
         JADE_ASSERT(!cbor_value_at_end(&arrayItem));
 
-        // By default, assume not a validated or change output, and so user must verify
-        JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_VALIDATED | OUTPUT_FLAG_CHANGE)));
+        // Initially we assume the output isn't a wallet output or wallet
+        // change, so the user must explicitly confirm it.
+        JADE_ASSERT(!(outinfo->flags & (OUTPUT_FLAG_IS_OURS | OUTPUT_FLAG_CHANGE)));
         if (cbor_value_is_map(&arrayItem)) {
             // Output path info passed, try to verify output
             JADE_LOGD("Output %u has output/change data passed", i);
 
             // For backward-compatibility reasons we assume all populated items
             // are change unless told otherwise (ie. explicit is_change: false)
-            bool is_change = true;
-            rpc_get_boolean("is_change", &arrayItem, &is_change);
+            bool is_change = rpc_get_bool_or("is_change", &arrayItem, true);
 
-            size_t csv_blocks = 0;
             size_t script_len = 0;
             uint8_t script[WALLY_SCRIPTPUBKEY_P2WSH_LEN]; // Sufficient
             size_t written = 0;
+            bool is_green_2of3 = false;
 
             // If multisig, need to verify against the registered multisig wallets
             if (rpc_has_field_data("multisig_name", &arrayItem)) {
@@ -170,8 +169,7 @@ static bool params_signing_outputs(jade_process_t* process, const CborValue* par
                     goto cleanup;
                 }
             } else if (rpc_has_field_data("descriptor_name", &arrayItem)) {
-                // Not valid for liquid wallets atm
-                if (network_is_liquid(network_id)) {
+                if (network_is_liquid(network_id) && !descriptor_allow_liquid()) {
                     errmsg = "Descriptor wallets not supported on liquid network";
                     goto cleanup;
                 }
@@ -189,9 +187,9 @@ static bool params_signing_outputs(jade_process_t* process, const CborValue* par
                 }
 
                 // The path is given in two parts - optional (change) branch and mandatory index pointer
-                size_t branch = 0, pointer = 0;
-                rpc_get_sizet("branch", &arrayItem, &branch); // optional
-                if (!rpc_get_sizet("pointer", &arrayItem, &pointer)) {
+                const uint32_t branch = rpc_get_uint32_or("branch", &arrayItem, 0); // optional
+                uint32_t pointer = 0;
+                if (!rpc_get_uint32("pointer", &arrayItem, &pointer)) {
                     errmsg = "Failed to extract path elements from parameters";
                     goto cleanup;
                 }
@@ -229,16 +227,25 @@ static bool params_signing_outputs(jade_process_t* process, const CborValue* par
                     written = 0;
                     char xpubrecovery[120]; // Should be sufficient as all xpubs should be <= 112
                     rpc_get_string("recovery_xpub", sizeof(xpubrecovery), &arrayItem, xpubrecovery, &written);
+                    is_green_2of3 = written != 0;
+                    if (is_green_2of3 && is_change) {
+                        // Green 2of3: We don't trust the host-provided xpub, so
+                        // force the user to validate this probable change output.
+                        // TODO: Allow registration of 2of3 accounts so the user
+                        //       doesn't have to validate legitimate change outputs.
+                        JADE_LOGD("Ignoring 2of3 change identification");
+                        is_change = false;
+                    }
 
-                    // Optional 'blocks' for csv outputs
-                    rpc_get_sizet("csv_blocks", &arrayItem, &csv_blocks);
+                    // Optional 'blocks' for csv outputs, defaults to 0
+                    const uint32_t csv_blocks = rpc_get_uint32_or("csv_blocks", &arrayItem, 0);
 
                     // If number of csv blocks unexpected show a warning message and ask the user to confirm
                     if (csv_blocks && !network_is_known_csv_blocks(network_id, csv_blocks)) {
-                        JADE_LOGW("Unexpected number of csv blocks in path for output: %u", csv_blocks);
+                        JADE_LOGW("Unexpected number of csv blocks in path for output: %" PRIu32, csv_blocks);
                         const int ret = snprintf(outinfo->message, sizeof(outinfo->message),
-                            "This wallet output has a non-standard csv value (%u), so it may be difficult to find.  "
-                            "Proceed at your own risk.",
+                            "This wallet output has a non-standard csv value (%" PRIu32
+                            "), so it may be difficult to find.  Proceed at your own risk.",
                             csv_blocks);
                         JADE_ASSERT(
                             ret > 0 && ret < sizeof(outinfo->message)); // Keep message within size handled by gui
@@ -296,9 +303,15 @@ static bool params_signing_outputs(jade_process_t* process, const CborValue* par
             JADE_LOGI("Output %u receive path/script validated", i);
 
             // Set appropriate flags
-            outinfo->flags |= OUTPUT_FLAG_VALIDATED;
-            if (is_change) {
-                outinfo->flags |= OUTPUT_FLAG_CHANGE;
+            if (!is_green_2of3) {
+                // Note for Green 2of3 we don't trust the host-provided xpub, so
+                // we do not mark this output as belonging to our wallet.
+                // TODO: Allow registration of 2of3 accounts so the user
+                //       doesn't have to confirm legitimate wallet outputs.
+                outinfo->flags |= OUTPUT_FLAG_IS_OURS;
+                if (is_change) {
+                    outinfo->flags |= OUTPUT_FLAG_CHANGE;
+                }
             }
         }
         const CborError err = cbor_value_advance(&arrayItem);
@@ -369,7 +382,7 @@ static void send_ae_signature_replies(const network_t network_id, jade_process_t
         }
 
         // Send signature reply - will be empty for any inputs we are not signing
-        jade_process_reply_to_message_bytes(process->ctx, input_data->sig, input_data->sig_len);
+        jade_process_reply_to_message_bytes(&process->ctx, input_data->sig, input_data->sig_len);
     }
 cleanup:
     (void)process; /* No-op for label */
@@ -436,8 +449,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
 
     // Whether to use Anti-Exfil signatures and message flow
     // Optional flag, defaults to false
-    bool use_ae_signatures = false;
-    rpc_get_boolean("use_ae_signatures", &params, &use_ae_signatures);
+    const bool use_ae_signatures = rpc_get_bool_or("use_ae_signatures", &params, false);
 
     commitment_t* commitments = NULL;
     // Liquid: Copy trusted commitment data so we can free the message
@@ -476,6 +488,20 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
             process, &params, tx, &txtype, &is_partial, &in_sums, &num_in_sums, &out_sums, &num_out_sums, &errmsg)) {
         jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
         goto cleanup;
+    }
+
+    // Liquid: Optional ELIP-0101 genesis blockhash can override test network defaults.
+    // Defers to params_genesis_hash() for validation (incl. disallowing on Bitcoin).
+    uint8_t genesis_hash[SHA256_LEN];
+    {
+        const uint8_t* genesis = NULL;
+        size_t genesis_len = 0;
+        rpc_get_bytes_ptr("genesis_hash", &params, &genesis, &genesis_len);
+        params_genesis_hash(network_id, for_liquid, genesis, genesis_len, genesis_hash, sizeof(genesis_hash), &errmsg);
+        if (errmsg) {
+            jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
+            goto cleanup;
+        }
     }
 
     // Liquid: Gather the (unblinded) output info for user confirmation,
@@ -539,7 +565,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
     uint32_t num_p2tr_to_sign = 0; // Total number of p2tr inputs to sign
 
     // Loop to fetch data for and validate all inputs
-    for (size_t index = 0; index < tx->num_inputs; ++index) {
+    for (uint32_t index = 0; index < tx->num_inputs; ++index) {
         jade_process_load_in_message(process, true);
         if (!IS_CURRENT_MESSAGE(process, "tx_input")) {
             // Protocol error
@@ -580,7 +606,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
                 goto cleanup;
             }
             if (!sighash_is_supported(txtype, input_data->sig_type, input_data->sighash, for_liquid, is_partial)) {
-                JADE_LOGW("Unsupported sighash for signing input %u", index);
+                JADE_LOGW("Unsupported sighash for signing input %" PRIu32, index);
                 jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, "Unsupported sighash value");
                 goto cleanup;
             }
@@ -602,7 +628,11 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
                 if (params_commitment_data(&params, &c, NULL, &errmsg)) {
                     JADE_ASSERT(!errmsg);
                     // Valid input commitments: update the summary
-                    asset_summary_update(in_sums, num_in_sums, c.asset_id, sizeof(c.asset_id), c.value);
+                    if (!asset_summary_update(in_sums, num_in_sums, c.asset_id, sizeof(c.asset_id), c.value)) {
+                        errmsg = "Failed to validate input/output summary information";
+                        jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
+                        goto cleanup;
+                    }
                 } else if (errmsg) {
                     // Invalid input commitments (rather than simply not present)
                     jade_process_reject_message(process, CBOR_RPC_BAD_PARAMETERS, errmsg);
@@ -628,8 +658,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
             }
         } else if (!for_liquid) {
             // Bitcoin: May still need witness flag
-            bool is_witness = false;
-            rpc_get_boolean("is_witness", &params, &is_witness);
+            const bool is_witness = rpc_get_bool_or("is_witness", &params, false);
             input_data->sig_type = is_witness ? WALLY_SIGTYPE_SW_V0 : WALLY_SIGTYPE_PRE_SW;
             input_data->sighash = WALLY_SIGHASH_ALL;
         }
@@ -720,7 +749,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
             // Get the amount
             uint64_t satoshi;
             int res = WALLY_EINVAL;
-            if (rpc_get_uint64_t("satoshi", &params, &satoshi)) {
+            if (rpc_get_uint64("satoshi", &params, &satoshi)) {
                 res = wally_map_add_integer(&signing_data->amounts, index, (uint8_t*)&satoshi, sizeof(uint64_t));
                 // Keep a running total
                 input_amount += satoshi;
@@ -790,27 +819,19 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
         // as this simplifies the code both here and in the client.
         if (use_ae_signatures) {
             const size_t commitment_len = made_ae_commitment ? sizeof(ae_signer_commitment) : 0;
-            jade_process_reply_to_message_bytes(process->ctx, ae_signer_commitment, commitment_len);
+            jade_process_reply_to_message_bytes(&process->ctx, ae_signer_commitment, commitment_len);
         }
     }
 
     // Loop to process any taproot inputs now that we have all input
     // amounts and scriptpubkeys
-    uint8_t genesis_buff[SHA256_LEN], *genesis = NULL;
-    size_t genesis_len = 0;
-    if (for_liquid && num_p2tr_to_sign) {
-        // Liquid: Fetch the genesis blockhash for taproot hash generation
-        genesis = genesis_buff;
-        network_to_genesis_hash(network_id, genesis, sizeof(genesis_buff));
-        genesis_len = sizeof(genesis_buff);
-    }
     for (size_t index = 0; num_p2tr_to_sign != 0 && index < tx->num_inputs; ++index) {
         input_data_t* const input_data = &signing_data->inputs[index];
         if (input_data->sig_type != WALLY_SIGTYPE_SW_V1 || !input_data->path_len) {
             // Not signing this input
             continue;
         }
-        if (!wallet_get_tx_input_hash(tx, index, signing_data, NULL, 0, genesis, genesis_len)) {
+        if (!wallet_get_tx_input_hash(tx, index, signing_data, NULL, 0, genesis_hash, sizeof(genesis_hash))) {
             // We are using ae-signatures, so we need to load the message to send the error back on
             jade_process_load_in_message(process, true);
             jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Failed to make taproot tx input hash");
@@ -884,8 +905,7 @@ static void sign_tx_impl(jade_process_t* process, const bool for_liquid)
 
     // Show warning if nothing to sign
     if (num_to_sign == 0) {
-        const char* message[] = { "There are no relevant", "inputs to be signed" };
-        await_message_activity(message, 2);
+        await_message_2("There are no relevant", "inputs to be signed");
     }
 
     display_processing_message_activity();

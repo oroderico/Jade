@@ -1,13 +1,42 @@
 #!/usr/bin/env python
 
 import base64
+import json
 import click
 import functools
 import logging
 import os
+import sys
 import time
 
 from jadepy.jade import JadeAPI
+
+
+def h2b(hexdata):
+    if hexdata is None or isinstance(hexdata, (int, bool)):
+        return hexdata
+    if isinstance(hexdata, list):
+        return list(map(h2b, hexdata))
+    if isinstance(hexdata, dict):
+        return {k: h2b(v) for k, v in hexdata.items()}
+    return bytes.fromhex(hexdata)
+
+
+def b2h_impl(obj, leaf_fn):
+    if isinstance(obj, dict):
+        return {k: b2h_impl(v, leaf_fn) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [b2h_impl(v, leaf_fn) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(b2h_impl(v, leaf_fn) for v in obj)
+    return leaf_fn(obj)
+
+
+def b2h(result):
+    return b2h_impl(
+        result,
+        lambda v: bytes(v).hex() if isinstance(v, (bytes, bytearray)) else v
+    )
 
 
 class JadeClient:
@@ -15,7 +44,10 @@ class JadeClient:
         self.device = device
 
     def __enter__(self):
-        self.jade = JadeAPI.create_serial(device=self.device)
+        if self.device == 'libjade':
+            self.jade = JadeAPI.create_libjade()
+        else:
+            self.jade = JadeAPI.create_serial(device=self.device)
         self.jade.connect()
         self.jade.add_entropy(os.urandom(32))
         return self.jade
@@ -70,6 +102,15 @@ def cli(ctx, verbose, device):
 
     if verbose:
         logging.basicConfig(level=logging.INFO)
+
+
+# DEBUG
+
+@cli.command()
+@with_jade_client
+def selfcheck(jade):
+    response = jade.run_remote_selfcheck()
+    click.echo(response)
 
 
 # INFO
@@ -148,11 +189,16 @@ def sign_message(jade, path, message, network):
 
 @cli.command()
 @click.argument('tx')
+@click.argument('inputs')
+@click.argument('change')
 @click.option('--network', default='testnet')
 @with_jade_client
-def sign_tx(jade, tx, network):
-    result = jade.sign_tx(network, tx)
-    click.echo(base64.b64encode(result))
+def sign_tx(jade, tx, inputs, change, network):
+    tx_bytes = bytes.fromhex(tx)
+    inputs_obj = h2b(json.loads(inputs))
+    change_obj = h2b(json.loads(change))
+    result = jade.sign_tx(network, tx_bytes, inputs_obj, change_obj)
+    click.echo(json.dumps(b2h(result)))
 
 
 @cli.command()
@@ -183,6 +229,41 @@ def register_otp(jade, name, uri, network):
 def get_otp_code(jade, name, network):
     result = jade.get_otp_code(name)
     click.echo(result)
+
+
+# UTILITY/DEBUG
+
+@cli.command()
+@click.argument('filename')
+@click.option('--check_qr', type=bool, default=False)
+@with_jade_client
+def capture_image_data(jade, filename, check_qr):
+    # NOTE: Requires a DEBUG firmware with CONFIG_RETURN_CAMERA_IMAGES
+    # enabled. Used for generating test case .dat image files.
+    result = jade.capture_image_data(check_qr)
+    with open(filename, 'wb') as f:
+        f.write(result)
+        click.echo(f'Image data written to {filename}')
+
+
+@cli.command()
+@click.argument('mnemonic')
+@click.option('--passphrase', default=None)
+@click.option('--temporary', type=bool, default=False)
+@with_jade_client
+def debug_set_mnemonic(jade, mnemonic, passphrase, temporary):
+    # NOTE: Requires a DEBUG firmware. Should not be used with a real mnemonic
+    # or real funds.
+    result = jade.set_mnemonic(mnemonic, passphrase, temporary)
+    click.echo(result)
+
+
+@cli.command()
+@with_jade_client
+def drain(jade):
+    while (True):
+        jade.drain()
+        time.sleep(1)
 
 
 if __name__ == "__main__":

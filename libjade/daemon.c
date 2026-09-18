@@ -8,10 +8,12 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -361,7 +363,10 @@ static void socket_bridge(const char* socket_path)
 static int usage(const char* cmd, const char* error)
 {
     fprintf(stderr, "Error: %s.\n", error);
-    fprintf(stderr, "Usage: %s [--serialport [SYMLINK_PATH] | --tcp PORT | --socketfile PATH]\n", cmd);
+    fprintf(stderr,
+        "Usage: %s [--serialport [SYMLINK_PATH] | --tcp PORT | --socketfile PATH]"
+        " [--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL]\n",
+        cmd);
     return EXIT_FAILURE;
 }
 
@@ -373,6 +378,7 @@ int main(int argc, char* argv[])
     int tcp_port = 0;
     int socket_mode = 0;
     char* socket_path = NULL;
+    int log_level = ESP_LOG_NONE;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--serialport") == 0) {
@@ -402,6 +408,24 @@ int main(int argc, char* argv[])
             } else {
                 return usage(argv[0], "--socketfile requires a PATH argument");
             }
+        } else if (strcmp(argv[i], "--log-level") == 0) {
+            if (i + 1 >= argc) {
+                return usage(argv[0], "--log-level requires an argument");
+            }
+            ++i;
+            if (strcasecmp(argv[i], "DEBUG") == 0) {
+                log_level = ESP_LOG_DEBUG;
+            } else if (strcasecmp(argv[i], "INFO") == 0) {
+                log_level = ESP_LOG_INFO;
+            } else if (strcasecmp(argv[i], "WARNING") == 0) {
+                log_level = ESP_LOG_WARN;
+            } else if (strcasecmp(argv[i], "ERROR") == 0) {
+                log_level = ESP_LOG_ERROR;
+            } else if (strcasecmp(argv[i], "CRITICAL") == 0) {
+                log_level = ESP_LOG_NONE;
+            } else {
+                return usage(argv[0], "--log-level must be one of: DEBUG|INFO|WARNING|ERROR|CRITICAL");
+            }
         } else {
             return usage(argv[0], "Unknown option");
         }
@@ -412,8 +436,7 @@ int main(int argc, char* argv[])
     }
 
     libjade_start();
-    // FIXME: Add log-level cmdline parameter
-    libjade_set_log_level(ESP_LOG_NONE);
+    libjade_set_log_level(log_level);
 
     if (serial_mode) {
         serial_init(serial_link_path);

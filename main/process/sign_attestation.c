@@ -38,17 +38,19 @@ void sign_attestation_and_send_reply(jade_process_t* process, const uint8_t* cha
     // Compute the signature and send back to caller
     size_t pem_written = 0;
     attestation_reply_t output;
+    output.ext_signature_len = 0;
     if (!attestation_sign_challenge(challenge, challenge_len, output.signature, sizeof(output.signature),
             output.pubkey_pem, sizeof(output.pubkey_pem), &pem_written, output.ext_signature,
             sizeof(output.ext_signature), &output.ext_signature_len)
         || !pem_written || !output.ext_signature_len) {
         jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "Failed to sign attestation");
+        return;
     }
 
     // Reply with pubkey and signatures
     const size_t buflen = 2560;
     uint8_t* const buf = JADE_MALLOC(buflen);
-    jade_process_reply_to_message_result(process->ctx, buf, buflen, &output, reply_attestation);
+    jade_process_reply_to_message_result(&process->ctx, buf, buflen, &output, reply_attestation);
     free(buf);
 }
 #endif // CONFIG_IDF_TARGET_ESP32S3

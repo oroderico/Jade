@@ -5,7 +5,25 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <cbor.h>
+
+#include "jade_assert.h"
 #include "otpauth.h"
+
+// NOTE: Jade only supports the bip39 English wordlist,
+// with a 12 or 24 word mnemonic phrase.
+#define MNEMONIC_MAXWORDS 24
+
+// The longest valid words in the English wordlist are 8 characters.
+#define MNEMONIC_MAX_WORD_LEN 8
+
+// Size of a buffer for holding a mnemonic phrase.
+// 24 8-character words + 23 spaces + NUL = 216 bytes
+#define MNEMONIC_BUFLEN 216
+
+#define ACCOUNT_INDEX_MAX 65536
+#define ACCOUNT_INDEX_FLAGS_SHIFT 16
+#define EXPORT_XPUB_PATH_LEN 4
 
 // Display singlesig xpub qr code
 void display_xpub_qr(void);
@@ -14,8 +32,11 @@ void display_xpub_qr(void);
 void handle_scan_qr(void);
 
 // Display a BC-UR bytes message
-bool display_bcur_bytes_qr(
+WARN_UNUSED_RESULT bool display_bcur_bytes_qr(
     const char* message[], size_t message_size, const uint8_t* data, size_t data_len, const char* help_url);
+
+// Display bip85/bip39 encrypted entropy as BC-UR QR.
+void show_bip85_bip39_entropy_qr(const uint8_t* cbor, const size_t cbor_len);
 
 // Display screen with qr code
 // Handles up to v6. codes - ie text up to 134 bytes

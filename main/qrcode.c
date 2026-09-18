@@ -34,6 +34,7 @@
 
 #include "jade_assert.h"
 #include "utils/malloc_ext.h"
+#include <wally_core.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -1073,11 +1074,14 @@ bool qrcode_toFragmentsIcons(
 }
 // End Blockstream added function
 
-void qrcode_freeIcon(Icon* icon)
+void qrcode_freeIconData(Icon* icon)
 {
-    JADE_ASSERT(icon);
-
-    free(icon->data);
+    if (icon && icon->data) {
+        // Wipe icon data before freeing as it may contain secret data
+        const size_t num_bytes = qrcode_get_icon_data_size(icon->width, icon->height);
+        wally_bzero(icon->data, num_bytes);
+        free(icon->data);
+    }
 }
 
 /*

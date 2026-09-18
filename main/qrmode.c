@@ -25,17 +25,13 @@
 
 #include <wally_script.h>
 
+#include <inttypes.h>
 #include <string.h>
 #include <time.h>
-
-#define MNEMONIC_BUFLEN 256
 
 #define MAX_QR_V2_DATA_LEN 32
 #define MAX_QR_V4_DATA_LEN 78
 #define MAX_QR_V6_DATA_LEN 134
-
-#define ACCOUNT_INDEX_MAX 65536
-#define ACCOUNT_INDEX_FLAGS_SHIFT 16
 
 #define MAX_OTP_SCREENS 1
 #define OTP_TEXTSPLITLEN 4
@@ -103,8 +99,6 @@ network_t network_from_psbt_type(struct wally_psbt* psbt);
 int sign_psbt(
     jade_process_t* process, CborValue* params, network_t network_id, struct wally_psbt* psbt, const char** errmsg);
 int wally_psbt_free(struct wally_psbt* psbt);
-
-#define EXPORT_XPUB_PATH_LEN 4
 
 #define ADDRESS_SEARCH_BATCH_SIZE(registered_wallet) (registered_wallet ? 10 : 20)
 #define NUM_BATCHES_TO_RECONFIRM(registered_wallet) (registered_wallet ? 20 : 25)
@@ -362,8 +356,7 @@ bool handle_xpub_options(uint32_t* qr_flags, bool for_descriptor)
                     // Show message and retry
                     const int ret = snprintf(buf, sizeof(buf), "%u", ACCOUNT_INDEX_MAX);
                     JADE_ASSERT(ret > 0 && ret < sizeof(buf));
-                    const char* message[] = { "Account index must", "be less than", buf };
-                    await_error_activity(message, 3);
+                    await_error_3("Account index must", "be less than", buf);
                 }
             }
         } else if (ev_id == BTN_XPUB_OPTIONS_HELP) {
@@ -458,8 +451,7 @@ static bool load_registered_wallet(const size_t script_type, char* name_out, con
     if (is_multisig) {
         multisig_data_t* const allocated = JADE_MALLOC(sizeof(multisig_data_t));
         if (!multisig_load_from_storage(wallet_name, allocated, NULL, 0, NULL, &errmsg)) {
-            const char* message[] = { "Failed to load multisig record" };
-            await_error_activity(message, 1);
+            await_error("Failed to load multisig record");
             free(allocated);
             return false;
         }
@@ -467,8 +459,7 @@ static bool load_registered_wallet(const size_t script_type, char* name_out, con
     } else {
         descriptor_data_t* const allocated = JADE_MALLOC(sizeof(descriptor_data_t));
         if (!descriptor_load_from_storage(wallet_name, allocated, &errmsg)) {
-            const char* message[] = { "Failed to load descriptor record" };
-            await_error_activity(message, 1);
+            await_error("Failed to load descriptor record");
             free(allocated);
             return false;
         }
@@ -601,8 +592,7 @@ static bool handle_address_options(const bool show_account, uint16_t* account_in
 
                         break;
                     } else {
-                        const char* message[] = { "Invalid index", "Please try again" };
-                        await_message_activity(message, 2);
+                        await_message_2("Invalid index", "Please try again");
                     }
                 }
             } else if (ev_id == BTN_SCAN_ADDRESS_OPTIONS_CHANGE) {
@@ -634,16 +624,14 @@ static bool verify_address(const address_data_t* const addr_data)
 
     // check network - eg. testnet address, but this jade is setup for mainnet only
     if (!keychain_is_network_id_consistent(addr_data->network_id)) {
-        const char* message[] = { "Network type inconsistent" };
-        await_error_activity(message, 1);
+        await_error("Network type inconsistent");
         return false;
     }
 
     // Get the script type
     size_t script_type = 0;
     if (wally_scriptpubkey_get_type(addr_data->script, addr_data->script_len, &script_type) != WALLY_OK) {
-        const char* message[] = { "Failed to parse scriptpubkey" };
-        await_error_activity(message, 1);
+        await_error("Failed to parse scriptpubkey");
         return false;
     }
 
@@ -667,8 +655,7 @@ static bool verify_address(const address_data_t* const addr_data)
             if (!load_registered_wallet(script_type, label, sizeof(label), &multisig_data, &descriptor)) {
                 JADE_ASSERT(!multisig_data && !descriptor);
                 JADE_LOGE("No relevant wallet records found/selected for address");
-                const char* message[] = { "Register wallet record", "before attempting to", "verify address" };
-                await_error_activity(message, 3);
+                await_error_3("Register wallet record", "before attempting to", "verify address");
                 return false;
             }
             JADE_ASSERT(!multisig_data != !descriptor); // Must be one or the other
@@ -694,8 +681,7 @@ static bool verify_address(const address_data_t* const addr_data)
         JADE_ASSERT(!search_roots_len);
 
         if (!get_singlesig_variant_from_script_type(script_type, &variant) || variant == GREEN) {
-            const char* message[] = { "Address scriptpubkey unsupported" };
-            await_error_activity(message, 1);
+            await_error("Address scriptpubkey unsupported");
             return false;
         }
 
@@ -725,19 +711,19 @@ static bool verify_address(const address_data_t* const addr_data)
     // ... and register against the activity - we will await btn events later
     gui_activity_register_event(act, GUI_BUTTON_EVENT, ESP_EVENT_ANY_ID, sync_wait_event_handler, event_data);
 
-    size_t index = 0;
-    size_t confirmed_at_index = index;
+    uint32_t index = 0;
+    uint32_t confirmed_at_index = index;
     bool verified = false;
     const size_t address_search_batch_size = ADDRESS_SEARCH_BATCH_SIZE(registered_wallet);
-    const size_t num_indexes_to_reconfirm = NUM_INDEXES_TO_RECONFIRM(registered_wallet);
+    const uint32_t num_indexes_to_reconfirm = NUM_INDEXES_TO_RECONFIRM(registered_wallet);
     while (!verified) {
         gui_set_current_activity(act);
 
         // Update the progress bar and text label
         char idx_txt[12];
-        const int ret = snprintf(idx_txt, sizeof(idx_txt), "%u", index);
+        const int ret = snprintf(idx_txt, sizeof(idx_txt), "%" PRIu32, index);
         JADE_ASSERT(ret > 0 && ret < sizeof(idx_txt));
-        update_progress_bar(&progress_bar, num_indexes_to_reconfirm, index - confirmed_at_index);
+        update_progress_bar(&progress_bar, (size_t)num_indexes_to_reconfirm, (size_t)(index - confirmed_at_index));
         gui_update_text(index_text, idx_txt);
 
         // Search a small batch of paths for the address script
@@ -765,7 +751,7 @@ static bool verify_address(const address_data_t* const addr_data)
         if (verified) {
             // Address script found and matched - verified
             // NOTE: 'index' will hold the relevant value
-            JADE_LOGI("Found script at index: %u", index);
+            JADE_LOGI("Found script at index: %" PRIu32, index);
             break;
         }
 
@@ -773,7 +759,7 @@ static bool verify_address(const address_data_t* const addr_data)
         if (index >= confirmed_at_index + num_indexes_to_reconfirm) {
             char next_n_addrs[32];
             const int ret
-                = snprintf(next_n_addrs, sizeof(next_n_addrs), "next %u addresses?", num_indexes_to_reconfirm);
+                = snprintf(next_n_addrs, sizeof(next_n_addrs), "next %" PRIu32 " addresses?", num_indexes_to_reconfirm);
             JADE_ASSERT(ret > 0 && ret < sizeof(next_n_addrs));
 
             const char* message[] = { "Failed to verify, check", next_n_addrs };
@@ -826,13 +812,11 @@ static bool verify_address(const address_data_t* const addr_data)
 
     if (verified) {
         char pathstr[48];
-        const int ret = snprintf(pathstr, sizeof(pathstr), "%s/%u", label, index);
+        const int ret = snprintf(pathstr, sizeof(pathstr), "%s/%" PRIu32, label, index);
         JADE_ASSERT(ret > 0 && ret < sizeof(pathstr));
-        const char* message[] = { "Address verified:", pathstr };
-        await_message_activity(message, 2);
+        await_message_2("Address verified:", pathstr);
     } else {
-        const char* message[] = { "Address NOT verified!" };
-        await_error_activity(message, 1);
+        await_error("Address NOT verified!");
     }
 
     // Free any allocated data
@@ -943,7 +927,6 @@ static gui_activity_t* create_display_bcur_qr_activity(const char* message[], co
     return make_show_qr_activity(message, message_size, icons, num_icons, frames_per_qr, show_options_button);
 }
 
-// Display a QR code, with access to size/speed options
 static void display_bcur_qr(const char* message[], const size_t message_size, const char* bcur_type,
     const uint8_t* cbor, const size_t cbor_len, const char* help_url)
 {
@@ -1007,8 +990,7 @@ static bool handle_qr_bytes(const uint8_t* bytes, const size_t bytes_len)
         if (errcode) {
             if (errcode != CBOR_RPC_USER_CANCELLED) {
                 JADE_LOGE("Processing 'signmessage' QR failed: %d, %s", errcode, errmsg);
-                const char* message[] = { errmsg };
-                await_error_activity(message, 1);
+                await_error(errmsg);
             }
             return false;
         }
@@ -1047,16 +1029,15 @@ static bool handle_qr_bytes(const uint8_t* bytes, const size_t bytes_len)
     }
 
     // Try to handle as multisig file
-    if (strcasestr(strbytes, "Name") && strcasestr(strbytes, "Format") && strcasestr(strbytes, "Policy")
-        && strcasestr(strbytes, "Derivation")) {
+    if (strncasestr(strbytes, "Name", bytes_len) && strncasestr(strbytes, "Format", bytes_len)
+        && strncasestr(strbytes, "Policy", bytes_len) && strncasestr(strbytes, "Derivation", bytes_len)) {
         // Looks like a multisig registration file
         const char* errmsg = NULL;
         const int errcode = register_multisig_file(strbytes, bytes_len, &errmsg);
         if (errcode) {
             if (errcode != CBOR_RPC_USER_CANCELLED) {
                 JADE_LOGE("Processing multisig file failed: %s", errmsg);
-                const char* message[] = { errmsg };
-                await_error_activity(message, 1);
+                await_error(errmsg);
             }
             return false;
         }
@@ -1072,8 +1053,7 @@ static bool handle_qr_bytes(const uint8_t* bytes, const size_t bytes_len)
         if (import_mnemonic(bytes, bytes_len, mnemonic, sizeof(mnemonic), &written) && written < sizeof(mnemonic)) {
             if (!handle_mnemonic_qr(mnemonic)) {
                 JADE_LOGE("Handling new scanned mnemonic failed");
-                const char* message[] = { "Failed loading wallet" };
-                await_error_activity(message, 1);
+                await_error("Failed loading wallet");
                 SENSITIVE_POP(mnemonic);
                 return false;
             }
@@ -1084,8 +1064,7 @@ static bool handle_qr_bytes(const uint8_t* bytes, const size_t bytes_len)
     }
 
     JADE_LOGW("Unhandled QR (bytes) message");
-    const char* message[] = { "Unhandled QR payload" };
-    await_error_activity(message, 1);
+    await_error("Unhandled QR payload");
     return false;
 }
 
@@ -1098,8 +1077,7 @@ static bool handle_bcur_bytes(const uint8_t* cbor, const size_t cbor_len)
     const uint8_t* bytes = NULL;
     size_t bytes_len = 0;
     if (!bcur_parse_bytes(cbor, cbor_len, &bytes, &bytes_len)) {
-        const char* message[] = { "Invalid QR/BYTES format" };
-        await_error_activity(message, 1);
+        await_error("Invalid QR/BYTES format");
         return false;
     }
     return handle_qr_bytes(bytes, bytes_len);
@@ -1115,8 +1093,7 @@ static bool parse_sign_display_bcur_psbt_qr(const uint8_t* cbor, const size_t cb
     struct wally_psbt* psbt = NULL;
     if (!bcur_parse_psbt(cbor, cbor_len, &psbt)) {
         // Unexpected type/format
-        const char* message[] = { "Unsupported QR/PSBT format" };
-        await_error_activity(message, 1);
+        await_error("Unsupported QR/PSBT format");
         return false;
     }
 
@@ -1129,8 +1106,7 @@ static bool parse_sign_display_bcur_psbt_qr(const uint8_t* cbor, const size_t cb
     const int errcode = sign_psbt(NULL, NULL, network_id, psbt, &errmsg);
     if (errcode) {
         if (errcode != CBOR_RPC_USER_CANCELLED) {
-            const char* message[] = { errmsg };
-            await_error_activity(message, 1);
+            await_error(errmsg);
         }
         goto cleanup;
     }
@@ -1153,43 +1129,50 @@ cleanup:
     return ret;
 }
 
+void show_bip85_bip39_entropy_qr(const uint8_t* cbor, const size_t cbor_len)
+{
+    JADE_ASSERT(cbor && cbor_len);
+    const char* message[] = { "Scan with", "wallet", "app" };
+    display_bcur_qr(message, 3, BCUR_TYPE_JADE_BIP8539_REPLY, cbor, cbor_len, "blkstrm.com/bip85");
+}
+
+// Returns false if an error occured or the user cancelled the action
 static bool handle_bip85_bip39_request_qr(const uint8_t* cbor, const size_t cbor_len)
 {
-    JADE_ASSERT(cbor);
-    JADE_ASSERT(cbor_len);
+    JADE_ASSERT(cbor && cbor_len);
 
     // Parse cbor
     CborValue root;
     CborParser parser;
     if (!bcur_parse_jade_message(cbor, cbor_len, &parser, &root, NULL, NULL)) {
         JADE_LOGE("Failed to parse Jade bip85/bip39 entropy request");
-        const char* message[] = { "Error parsing message" };
-        await_error_activity(message, 1);
+        await_error("Error parsing message");
         return false;
     }
 
-    uint8_t cbor_reply[176]; // sufficient
-    CborEncoder reply_encoder;
-    cbor_encoder_init(&reply_encoder, cbor_reply, sizeof(cbor_reply), 0);
-
     const char* errmsg = NULL;
+    uint8_t reply_cbor[176]; // sufficient for encrypted bip85 reply
+    SENSITIVE_PUSH(reply_cbor, sizeof(reply_cbor));
+
+    CborEncoder reply_encoder;
+    cbor_encoder_init(&reply_encoder, reply_cbor, sizeof(reply_cbor), 0);
+
     const int errcode = get_bip85_bip39_entropy_cbor(&root, &reply_encoder, &errmsg);
     if (errcode) {
         if (errcode != CBOR_RPC_USER_CANCELLED) {
             JADE_LOGE("Error generating encrypted bip85 entropy: %s", errmsg);
-            const char* message[] = { "Error in bip85/bip39", errmsg };
-            await_error_activity(message, 2);
+            await_error_2("Error generating entropy", errmsg);
         }
+        // An error occurred, or the user cancelled the action
+        SENSITIVE_POP(reply_cbor);
         return false;
     }
 
-    const size_t reply_cbor_len = cbor_encoder_get_buffer_size(&reply_encoder, cbor_reply);
-    JADE_ASSERT(reply_cbor_len && reply_cbor_len <= sizeof(cbor_reply));
+    const size_t reply_cbor_len = cbor_encoder_get_buffer_size(&reply_encoder, reply_cbor);
+    JADE_ASSERT(reply_cbor_len && reply_cbor_len <= sizeof(reply_cbor));
 
-    // Now display bcur QR
-    const char* message[] = { "Scan with", "wallet", "app" };
-    display_bcur_qr(message, 3, BCUR_TYPE_JADE_BIP8539_REPLY, cbor_reply, reply_cbor_len, "blkstrm.com/bip85");
-
+    show_bip85_bip39_entropy_qr(reply_cbor, reply_cbor_len);
+    SENSITIVE_POP(reply_cbor);
     return true;
 }
 
@@ -1205,8 +1188,7 @@ static bool handle_epoch_qr(const uint8_t* cbor, const size_t cbor_len)
     CborParser parser;
     if (!bcur_parse_jade_message(cbor, cbor_len, &parser, &root, "set_epoch", &params)) {
         JADE_LOGE("Failed to parse Jade epoch message");
-        const char* message[] = { "Error parsing epoch data" };
-        await_error_activity(message, 1);
+        await_error("Error parsing epoch data");
         return false;
     }
 
@@ -1215,8 +1197,7 @@ static bool handle_epoch_qr(const uint8_t* cbor, const size_t cbor_len)
     if (errcode) {
         if (errcode != CBOR_RPC_USER_CANCELLED) {
             JADE_LOGE("Error setting epoch time: %s", errmsg);
-            const char* message[] = { "Error setting epoch time", errmsg };
-            await_error_activity(message, 2);
+            await_error_2("Error setting epoch time", errmsg);
         }
         return false;
     }
@@ -1224,8 +1205,7 @@ static bool handle_epoch_qr(const uint8_t* cbor, const size_t cbor_len)
     char timestr[32];
     const uint64_t epoch_value = time(NULL);
     ctime_r((const time_t*)&epoch_value, timestr);
-    const char* message[] = { "Time set successfully", timestr };
-    await_message_activity(message, 2);
+    await_message_2("Time set successfully", timestr);
 
     return true;
 }
@@ -1242,8 +1222,7 @@ bool handle_update_pinserver_qr(const uint8_t* cbor, const size_t cbor_len)
     CborParser parser;
     if (!bcur_parse_jade_message(cbor, cbor_len, &parser, &root, "update_pinserver", &params)) {
         JADE_LOGE("Failed to parse Jade pinserver message");
-        const char* message[] = { "Error parsing Oracle data" };
-        await_error_activity(message, 1);
+        await_error("Error parsing Oracle data");
         return false;
     }
 
@@ -1252,8 +1231,7 @@ bool handle_update_pinserver_qr(const uint8_t* cbor, const size_t cbor_len)
     if (errcode) {
         if (errcode != CBOR_RPC_USER_CANCELLED) {
             JADE_LOGE("Error updating pinserver details: %s", errmsg);
-            const char* message[] = { "Error updating Oracle", errmsg };
-            await_error_activity(message, 2);
+            await_error_2("Error updating Oracle", errmsg);
         }
         return false;
     }
@@ -1265,17 +1243,15 @@ static bool handle_bip39_qr(const uint8_t* cbor, const size_t cbor_len)
     char mnemonic[MNEMONIC_BUFLEN];
     SENSITIVE_PUSH(mnemonic, sizeof(mnemonic));
     size_t written = 0;
+    bool ret = true;
     if (!bcur_parse_bip39(cbor, cbor_len, mnemonic, sizeof(mnemonic), &written) || written >= sizeof(mnemonic)
         || !handle_mnemonic_qr(mnemonic)) {
-        SENSITIVE_POP(mnemonic);
         JADE_LOGE("Processing scanned mnemonic data failed");
-        const char* message[] = { "Failed loading wallet" };
-        await_error_activity(message, 1);
-        return false;
+        await_error("Failed loading wallet");
+        ret = false;
     }
-
     SENSITIVE_POP(mnemonic);
-    return true;
+    return ret;
 }
 
 // Handle scanning a QR - supports addresses and PSBTs
@@ -1285,7 +1261,7 @@ void handle_scan_qr(void)
     char* type = NULL;
     uint8_t* data = NULL;
     size_t data_len = 0;
-    if (!bcur_scan_qr(NULL, &type, &data, &data_len, "blkstrm.com/jadescan") || !data) {
+    if (!bcur_scan_qr(NULL, &type, &data, &data_len, 0, "blkstrm.com/jadescan") || !data) {
         // Scan aborted
         JADE_ASSERT(!type);
         JADE_ASSERT(!data);
@@ -1327,8 +1303,7 @@ void handle_scan_qr(void)
         } else {
             // Other - unhandled
             JADE_LOGW("Unhandled BC-UR type: %s", type);
-            const char* message[] = { "Unhandled UR message" };
-            await_error_activity(message, 1);
+            await_error("Unhandled UR message");
         }
     } else {
         // Non-BC-UR (single frame) undifferentiated bytes
@@ -1511,14 +1486,12 @@ bool show_otp_uri_qr_activity(const otpauth_ctx_t* otp_ctx)
     SENSITIVE_PUSH(uri, sizeof(uri));
 
     if (!otp_load_uri(otp_ctx->name, uri, sizeof(uri), &written) || !written) {
-        const char* msg[] = { "Failed to load", "OTP URI" };
-        await_error_activity(msg, 2);
+        await_error_2("Failed to load", "OTP URI");
         goto cleanup;
     }
 
     if (written >= MAX_QR_V6_DATA_LEN) {
-        const char* msg[] = { "URI too long", "for QR" };
-        await_error_activity(msg, 2);
+        await_error_2("URI too long", "for QR");
         goto cleanup;
     }
 
@@ -1570,6 +1543,8 @@ void await_qr_help_activity(const char* url)
     char url_with_crlf[MAX_QR_V4_DATA_LEN + 2]; // new \n and trailing \0
     add_cr_after_last_slash(url, url_with_crlf, sizeof(url_with_crlf));
 
+    gui_activity_t* const prev_act = gui_current_activity(); // Save current activity
+
     // Show, and await button click - note gui takes ownership of icon
     gui_activity_t* const act = make_show_qr_help_activity(url_with_crlf, qr_icon);
     gui_set_current_activity(act);
@@ -1585,6 +1560,7 @@ void await_qr_help_activity(const char* url)
             break;
         }
     }
+    gui_destroy_current_activity(act, prev_act); // restore previous activity
 }
 
 // Display screen with help url and qr code
@@ -1623,9 +1599,9 @@ bool await_qr_back_continue_activity(
 // Create and post a 'cancel' message
 static bool post_cancel_message(const jade_msg_source_t source)
 {
-    uint8_t cbor_buf[32];
+    uint8_t cbor_buf[32 + 1];
     CborEncoder root_encoder;
-    cbor_encoder_init(&root_encoder, cbor_buf, sizeof(cbor_buf), 0);
+    cbor_encoder_init(&root_encoder, cbor_buf + 1, sizeof(cbor_buf) - 1, 0);
 
     CborEncoder root_map_encoder; // id, method
     CborError cberr = cbor_encoder_create_map(&root_encoder, &root_map_encoder, 2);
@@ -1635,16 +1611,17 @@ static bool post_cancel_message(const jade_msg_source_t source)
     cberr = cbor_encoder_close_container(&root_encoder, &root_map_encoder);
     JADE_ASSERT(cberr == CborNoError);
 
-    const size_t cbor_len = cbor_encoder_get_buffer_size(&root_encoder, cbor_buf);
-    return jade_process_push_in_message_ex(cbor_buf, cbor_len, source);
+    const size_t cbor_len = cbor_encoder_get_buffer_size(&root_encoder, cbor_buf + 1);
+    cbor_buf[0] = source;
+    return jade_process_push_in_message(cbor_buf, cbor_len + 1);
 }
 
 // Locally create and post an 'auth_user' request
 static bool post_auth_msg_request(const jade_msg_source_t source, const bool suppress_pin_change_confirmation)
 {
-    uint8_t cbor_buf[96];
+    uint8_t cbor_buf[96 + 1];
     CborEncoder root_encoder;
-    cbor_encoder_init(&root_encoder, cbor_buf, sizeof(cbor_buf), 0);
+    cbor_encoder_init(&root_encoder, cbor_buf + 1, sizeof(cbor_buf) - 1, 0);
 
     CborEncoder root_map_encoder; // id, method, params
     CborError cberr = cbor_encoder_create_map(&root_encoder, &root_map_encoder, 3);
@@ -1674,8 +1651,9 @@ static bool post_auth_msg_request(const jade_msg_source_t source, const bool sup
     cberr = cbor_encoder_close_container(&root_encoder, &root_map_encoder);
     JADE_ASSERT(cberr == CborNoError);
 
-    const size_t cbor_len = cbor_encoder_get_buffer_size(&root_encoder, cbor_buf);
-    return jade_process_push_in_message_ex(cbor_buf, cbor_len, source);
+    const size_t cbor_len = cbor_encoder_get_buffer_size(&root_encoder, cbor_buf + 1);
+    cbor_buf[0] = source;
+    return jade_process_push_in_message(cbor_buf, cbor_len + 1);
 }
 
 // Scan a bcur QR code, and post it into Jade with SOURCE_INTERNAL
@@ -1684,39 +1662,39 @@ static bool scan_qr_post_in_message(const char* label, const char* expected_type
     JADE_ASSERT(label);
     JADE_ASSERT(expected_type);
 
-    char* output_type = NULL;
-    uint8_t* output = NULL;
-    size_t output_len = 0;
+    char* type = NULL;
+    uint8_t* data = NULL;
+    size_t data_len = 0;
     bool ret = false;
 
-    // NOTE: we take ownership of 'output_type' and 'output'
-    if (!bcur_scan_qr(label, &output_type, &output, &output_len, "blkstrm.com/qrpin")) {
+    // NOTE: we take ownership of 'type' and 'data'
+    const uint32_t offset = 1; // Allow for a prefix message source byte
+    if (!bcur_scan_qr(label, &type, &data, &data_len, offset, "blkstrm.com/qrpin")) {
         JADE_LOGI("QR scanning failed or abandoned");
         return false;
     }
 
     // Check if a non-bc-ur code frame was scanned
-    if (!output_type) {
+    if (!type) {
         JADE_LOGW("Scanning encountered a non-BC-UR QR code, when expecting BC-UR type %s", expected_type);
-        const char* message[] = { "Unexpected QR payload" };
-        await_error_activity(message, 1);
+        await_error("Unexpected QR payload");
         goto cleanup;
     }
 
     // Check the type is as expected
-    if (strcasecmp(expected_type, output_type)) {
-        JADE_LOGW("Scanning returned unexpected type %s when expecting %s", output_type, expected_type);
-        const char* message[] = { "Unexpected QR payload type" };
-        await_error_activity(message, 1);
+    if (strcasecmp(expected_type, type)) {
+        JADE_LOGW("Scanning returned unexpected type %s when expecting %s", type, expected_type);
+        await_error("Unexpected QR payload type");
         goto cleanup;
     }
 
     // Post as message into Jade with source-qr prefix
-    ret = jade_process_push_in_message_ex(output, output_len, SOURCE_INTERNAL);
+    data[0] = SOURCE_INTERNAL;
+    ret = jade_process_push_in_message(data, data_len);
 
 cleanup:
-    free(output);
-    free(output_type);
+    free(data);
+    free(type);
     return ret;
 }
 
@@ -1741,7 +1719,7 @@ static bool handle_jade_reply_http_request_show_qr(const char* message[], const 
     // Parse the received message
     CborParser parser;
     CborValue root;
-    const CborError cberr = cbor_parser_init(msg, len, CborValidateBasic, &parser, &root);
+    const CborError cberr = cbor_parser_init(msg, len, 0, &parser, &root);
     if (cberr != CborNoError || !rpc_message_valid(&root)) {
         JADE_LOGE("Invalid cbor message");
         goto cleanup;
@@ -1749,7 +1727,7 @@ static bool handle_jade_reply_http_request_show_qr(const char* message[], const 
 
     // Ultimate response is boolean
     bool bool_result = false;
-    if (rpc_get_boolean("result", &root, &bool_result)) {
+    if (rpc_get_bool("result", &root, &bool_result)) {
         JADE_LOGI("Boolean result: %u", bool_result);
         goto cleanup;
     }

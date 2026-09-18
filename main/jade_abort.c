@@ -17,12 +17,12 @@ void jade_abort(const char* file, const int line_n)
     keychain_clear();
     sensitive_clear_stack();
 
-    if (gui_initialized()) {
+    if (gui_initialized() && !gui_is_gui_task()) {
         char details[128];
         const int ret = snprintf(details, sizeof(details), "%s:%d", file, line_n);
-        const char* message[] = { "Internal error", "", "Restarting" };
+        const char* message[3] = { "Internal error", "", "Restarting" };
         if (ret > 0 && ret < sizeof(details)) {
-            message[2] = details;
+            message[1] = details;
         }
         display_message_activity(message, 3);
     }

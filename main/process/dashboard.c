@@ -145,6 +145,7 @@ void get_blinding_factor_process(void* process_ptr);
 void sign_liquid_tx_process(void* process_ptr);
 void get_bip85_pubkey_process(void* process_ptr);
 void sign_bip85_digests_process(void* process_ptr);
+void show_bip85_bip39_entropy_process(void* process_ptr);
 #ifdef CONFIG_DEBUG_MODE
 void get_bip85_bip39_entropy_process(void* process_ptr);
 void get_bip85_rsa_entropy_process(void* process_ptr);
@@ -216,13 +217,14 @@ bool select_registered_wallet(const char multisig_names[][NVS_KEY_NAME_MAX_SIZE]
     const char descriptor_names[][NVS_KEY_NAME_MAX_SIZE], size_t num_descriptors, const char** wallet_name_out,
     bool* is_multisig);
 gui_activity_t* make_view_delete_wallet_activity(const char* wallet_name, bool allow_export);
-bool show_multisig_activity(const char* multisig_name, bool is_sorted, size_t threshold, size_t num_signers,
+bool show_multisig_activity(const char* multisig_name, bool is_sorted, uint32_t threshold, size_t num_signers,
     const signer_t* signer_details, size_t num_signer_details, const char* master_blinding_key_hex,
     const uint8_t* wallet_fingerprint, size_t wallet_fingerprint_len, bool initial_confirmation, bool overwriting,
     bool is_valid);
 bool show_descriptor_activity(const char* descriptor_name, const descriptor_data_t* descriptor,
-    const signer_t* signer_details, size_t num_signer_details, const uint8_t* wallet_fingerprint,
-    size_t wallet_fingerprint_len, bool initial_confirmation, bool overwriting, bool is_valid);
+    const char* blinding_key, const signer_t* signer_details, size_t num_signer_details,
+    const uint8_t* wallet_fingerprint, size_t wallet_fingerprint_len, network_t network_id, bool initial_confirmation,
+    bool overwriting, bool is_valid);
 
 gui_activity_t* make_session_activity(void);
 gui_activity_t* make_ble_activity(gui_view_node_t** ble_status_item);
@@ -255,7 +257,7 @@ static void process_get_version_info_request(jade_process_t* process)
 
     uint8_t buf[1024];
     jade_process_reply_to_message_result(
-        process->ctx, buf, sizeof(buf), &process->ctx.source, build_version_info_reply);
+        &process->ctx, buf, sizeof(buf), &process->ctx.source, build_version_info_reply);
 }
 
 // If the user has successfully authenticated over a given connection interface,
@@ -522,7 +524,7 @@ static void dispatch_message(jade_process_t* process)
 
             uint8_t buf[64];
             jade_process_reply_to_message_result(
-                process->ctx, buf, sizeof(buf), &elapsed_time_ms, cbor_result_uint64_cb);
+                &process->ctx, buf, sizeof(buf), &elapsed_time_ms, cbor_result_uint64_cb);
         } else {
             jade_process_reject_message(process, CBOR_RPC_INTERNAL_ERROR, "ERROR");
         }
@@ -599,6 +601,8 @@ static void dispatch_message(jade_process_t* process)
             task_function = get_bip85_pubkey_process;
         } else if (IS_METHOD("sign_bip85_digests")) {
             task_function = sign_bip85_digests_process;
+        } else if (IS_METHOD("show_bip85_bip39_entropy")) {
+            task_function = show_bip85_bip39_entropy_process;
         } else if (IS_METHOD("ota_data") || IS_METHOD("ota_complete") || IS_METHOD("tx_input")
             || IS_METHOD("get_extended_data") || IS_METHOD("get_signature") || IS_METHOD("pin")) {
             // Method we only expect as part of a multi-message protocol
@@ -702,14 +706,12 @@ static void offer_jade_reset(void)
         } else {
             // Erase failed ?    What can we do other than alert the user ?
             JADE_LOGE("Factory reset failed!");
-            const char* message[] = { "Unable to completely", "reset Jade." };
-            await_error_activity(message, 2);
+            await_error_2("Unable to completely", "reset Jade.");
         }
     } else {
         // Incorrect - continue to boot screen
         JADE_LOGI("User confirmation number incorrect, not wiping data.");
-        const char* message[] = { "Confirmation number", "incorrect!" };
-        await_error_activity(message, 2);
+        await_error_2("Confirmation number", "incorrect!");
     }
 }
 
@@ -905,11 +907,9 @@ static void handle_ble_reset(void)
     }
 
     if (ble_remove_all_devices()) {
-        const char* message[] = { "Bluetooth pairings", "deleted" };
-        await_message_activity(message, 2);
+        await_message_2("Bluetooth pairings", "deleted");
     } else {
-        const char* message[] = { "Failed to remove all", "Bluetooth pairings!" };
-        await_error_activity(message, 2);
+        await_error_2("Failed to remove all", "Bluetooth pairings!");
     }
 }
 
@@ -964,8 +964,7 @@ static void handle_ble(void)
                     if (keychain_get_userdata() == SOURCE_NONE) {
                         ble_start();
                     } else {
-                        const char* message[] = { "Bluetooth will be", "started on logout", "or disconnection" };
-                        await_message_activity(message, 3);
+                        await_message_3("Bluetooth will be", "started on logout", "or disconnection");
                     }
                 }
                 ble_flags |= BLE_ENABLED;
@@ -989,11 +988,7 @@ static void handle_ble(void)
     }
 }
 #else
-static void handle_ble(void)
-{
-    const char* message[] = { "BLE disabled in", "this firmware" };
-    await_message_activity(message, 2);
-}
+static void handle_ble(void) { await_message_2("BLE disabled in", "this firmware"); }
 
 #endif // CONFIG_BT_ENABLED
 
@@ -1005,6 +1000,7 @@ static void handle_change_pin(void)
     set_request_change_pin(change_pin);
 }
 
+#ifdef CONFIG_HAS_CAMERA
 static bool handle_change_pin_qr(void)
 {
     // Request/start a qr unlock
@@ -1028,6 +1024,7 @@ static bool handle_change_pin_qr(void)
     keychain_clear();
     return true;
 }
+#endif // CONFIG_HAS_CAMERA
 
 // Helper to delete a wallet registration record after user confirms
 static bool offer_delete_registered_wallet(const char* name, const bool is_multisig)
@@ -1041,13 +1038,11 @@ static bool offer_delete_registered_wallet(const char* name, const bool is_multi
     const bool erased
         = is_multisig ? storage_erase_multisig_registration(name) : storage_erase_descriptor_registration(name);
     if (!erased) {
-        const char* message[] = { "Failed to delete", "registered wallet!" };
-        await_error_activity(message, 2);
+        await_error_2("Failed to delete", "registered wallet!");
         return false;
     }
 
-    const char* message[] = { "Registered Wallet", "Deleted" };
-    await_message_activity(message, 2);
+    await_message_2("Registered Wallet", "Deleted");
     return true;
 }
 
@@ -1067,8 +1062,7 @@ static void handle_registered_wallets(void)
 
     const size_t num_registered_wallets = num_multisigs + num_descriptors;
     if (!num_registered_wallets) {
-        const char* message[] = { "No additional wallets", "registered" };
-        await_message_activity(message, 2);
+        await_message_2("No additional wallets", "registered");
         return;
     }
 
@@ -1084,6 +1078,7 @@ static void handle_registered_wallets(void)
     uint8_t fingerprint[BIP32_KEY_FINGERPRINT_LEN];
     wallet_get_fingerprint(fingerprint, sizeof(fingerprint));
     signer_t* const signer_details = JADE_CALLOC(MAX_ALLOWED_SIGNERS, sizeof(signer_t));
+    char* blinding_key = NULL;
 
     done = false;
     while (!done) {
@@ -1127,17 +1122,15 @@ static void handle_registered_wallets(void)
                     // Export as QR
                     if (!is_valid || num_signer_details != multisig_data.num_xpubs) {
                         JADE_LOGW("Unable to export multisig details - invalid or incomplete");
-                        const char* message[] = { "Unable to export", "wallet details" };
-                        await_error_activity(message, 2);
+                        await_error_2("Unable to export", "wallet details");
                         continue;
                     }
 
                     // Warning for unsorted multisig, as this is not strictly handled by the origial
                     // common file format and may not be supported by the imprting wallet.
                     if (!multisig_data.sorted) {
-                        const char* message[] = { "Exporting unsorted", "multisig - ensure the", "wallet app supports",
-                            "this configuration" };
-                        await_message_activity(message, 4);
+                        await_message_4(
+                            "Exporting unsorted", "multisig - ensure the", "wallet app supports", "this configuration");
                     }
                     display_processing_message_activity();
 
@@ -1148,8 +1141,7 @@ static void handle_registered_wallets(void)
                     if (!multisig_create_export_file(wallet_name, &multisig_data, signer_details, num_signer_details,
                             output, output_len, &written)) {
                         JADE_LOGE("Failed to export multisig details");
-                        const char* message[] = { "Unable to export", "wallet details" };
-                        await_error_activity(message, 2);
+                        await_error_2("Unable to export", "wallet details");
                         free(output);
                         continue;
                     }
@@ -1158,8 +1150,7 @@ static void handle_registered_wallets(void)
                     const char* message[] = { "Export", "Multisig", "wallet" };
                     if (!display_bcur_bytes_qr(message, 3, (const uint8_t*)output, written, "blkstrm.com/wallets")) {
                         JADE_LOGE("Failed to create multisig export details QR code");
-                        const char* message[] = { "Unable to export", "wallet details" };
-                        await_error_activity(message, 2);
+                        await_error_2("Unable to export", "wallet details");
                         free(output);
                         continue;
                     }
@@ -1204,21 +1195,27 @@ static void handle_registered_wallets(void)
                 // No option to export (atm)
                 JADE_ASSERT(ev_id == BTN_VIEW_WALLET);
 
+                // Free any blinding_key from a previous pass through the loop
+                if (blinding_key) {
+                    JADE_WALLY_VERIFY(wally_free_string(blinding_key));
+                    blinding_key = NULL;
+                }
+
                 // Get signer info from descriptor
                 size_t num_signer_details = 0;
                 if (!descriptor_get_signers(wallet_name, &descriptor, NETWORK_NONE, NULL, signer_details,
-                        MAX_ALLOWED_SIGNERS, &num_signer_details, &errmsg)) {
+                        MAX_ALLOWED_SIGNERS, &num_signer_details, &blinding_key, &errmsg)) {
                     JADE_LOGE("Failed to load signer information from descriptor data");
-                    const char* message[] = { "Unable to load", "signer details" };
-                    await_error_activity(message, 2);
+                    await_error_2("Unable to load", "signer details");
                     continue;
                 }
 
                 // We are not confirming or writing-to-storage
                 const bool initial_confirmation = false;
                 const bool overwriting = false;
-                if (!show_descriptor_activity(wallet_name, &descriptor, signer_details, num_signer_details, fingerprint,
-                        sizeof(fingerprint), initial_confirmation, overwriting, is_valid)) {
+                if (!show_descriptor_activity(wallet_name, &descriptor, blinding_key, signer_details,
+                        num_signer_details, fingerprint, sizeof(fingerprint), NETWORK_NONE, initial_confirmation,
+                        overwriting, is_valid)) {
                     // Delete record ?
                     done = offer_delete_registered_wallet(wallet_name, is_multisig);
                 }
@@ -1226,8 +1223,11 @@ static void handle_registered_wallets(void)
         }
     }
 
-    // Free any signer details
+    // Free any signer / blinding key details
     free(signer_details);
+    if (blinding_key) {
+        JADE_WALLY_VERIFY(wally_free_string(blinding_key));
+    }
 }
 
 static void set_wallet_erase_pin(void)
@@ -1309,8 +1309,7 @@ static void handle_wallet_erase_pin(void)
                 JADE_LOGI("Erasing Wallet-Erase PIN");
                 storage_erase_wallet_erase_pin();
 
-                const char* message[] = { "Wallet-Erase PIN", "deleted" };
-                await_message_activity(message, 2);
+                await_message_2("Wallet-Erase PIN", "deleted");
             } else if (ev_id == BTN_WALLET_ERASE_PIN_HELP) {
                 await_qr_help_activity("blkstrm.com/duress");
             } else if (ev_id == BTN_WALLET_ERASE_PIN_EXIT) {
@@ -1424,13 +1423,11 @@ static bool delete_otp_record(const char* otpname)
     }
 
     if (!storage_erase_otp(otpname)) {
-        const char* message[] = { "Failed to delete", "OTP record!" };
-        await_error_activity(message, 2);
+        await_error_2("Failed to delete", "OTP record!");
         return false;
     }
 
-    const char* message[] = { "OTP Record Deleted" };
-    await_message_activity(message, 1);
+    await_message("OTP Record Deleted");
     return true;
 }
 
@@ -1502,10 +1499,8 @@ static bool display_totp_screen(otpauth_ctx_t* otp_ctx, uint64_t epoch_value, ch
     progress_bar_t time_left = {};
     gui_activity_t* const act
         = make_show_totp_code_activity(otp_ctx->name, timestr, token, confirm_only, &time_left, &txt_ts, &txt_code);
-#ifndef CONFIG_LIBJADE_NO_GUI
     JADE_ASSERT(txt_ts);
     JADE_ASSERT(txt_code);
-#endif
     gui_set_current_activity(act);
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
@@ -1527,13 +1522,11 @@ static bool display_totp_screen(otpauth_ctx_t* otp_ctx, uint64_t epoch_value, ch
         if (auto_update) {
             switch (otp_set_default_value(otp_ctx, &epoch_value)) {
             case OTP_ERR_TOTP_TIME: {
-                const char* msg_totp[] = { "Failed to fetch time.", "Unlock with the", "Blockstream app." };
-                await_error_activity(msg_totp, 3);
+                await_error_3("Failed to fetch time.", "Unlock with the", "Blockstream app.");
                 return false;
             }
             case OTP_ERR_HOTP_COUNTER: {
-                const char* msg_hotp[] = { "Failed to fetch", "counter!" };
-                await_error_activity(msg_hotp, 2);
+                await_error_2("Failed to fetch", "counter!");
                 return false;
             }
             case OTP_ERR_OK:
@@ -1546,8 +1539,7 @@ static bool display_totp_screen(otpauth_ctx_t* otp_ctx, uint64_t epoch_value, ch
             if (count < last_count) {
                 // Wrapped - token code should have changed
                 if (!otp_get_auth_code(otp_ctx, token, token_len)) {
-                    const char* message[] = { "Failed to calculate", "OTP!" };
-                    await_error_activity(message, 2);
+                    await_error_2("Failed to calculate", "OTP!");
                     return false;
                 }
                 gui_update_text(txt_code, token);
@@ -1612,13 +1604,11 @@ static bool show_otp_code(otpauth_ctx_t* otp_ctx)
     uint64_t value = 0;
     switch (otp_set_default_value(otp_ctx, &value)) {
     case OTP_ERR_TOTP_TIME: {
-        const char* msg_totp[] = { "Failed to fetch time.", "Unlock with the", "Blockstream app." };
-        await_error_activity(msg_totp, 3);
+        await_error_3("Failed to fetch time.", "Unlock with the", "Blockstream app.");
         return false;
     }
     case OTP_ERR_HOTP_COUNTER: {
-        const char* msg_hotp[] = { "Failed to fetch", "counter!" };
-        await_error_activity(msg_hotp, 2);
+        await_error_2("Failed to fetch", "counter!");
         return false;
     }
     case OTP_ERR_OK:
@@ -1628,8 +1618,7 @@ static bool show_otp_code(otpauth_ctx_t* otp_ctx)
     // Calculate token
     char token[OTP_MAX_TOKEN_LEN];
     if (!otp_get_auth_code(otp_ctx, token, sizeof(token))) {
-        const char* message[] = { "Failed to calculate", "OTP!" };
-        await_error_activity(message, 2);
+        await_error_2("Failed to calculate", "OTP!");
         return false;
     }
 
@@ -1649,8 +1638,7 @@ static void handle_view_otps(void)
     JADE_ASSERT(done);
 
     if (num_otp_records == 0) {
-        const char* message[] = { "No OTP records", "registered" };
-        await_message_activity(message, 2);
+        await_message_2("No OTP records", "registered");
         return;
     }
 
@@ -1713,9 +1701,10 @@ static void handle_view_otps(void)
     SENSITIVE_POP(otp_uri);
 }
 
-// NOTE: Only Jade v1.1's and v2's have brightness controls
+// NOTE: Only boards listed here have brightness controls
 #if defined(CONFIG_BOARD_TYPE_JADE_V1_1) || defined(CONFIG_BOARD_TYPE_JADE_V2_ANY)                                     \
-    || defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
+    || defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2) || defined(CONFIG_BOARD_TYPE_TTGO_TDISPLAY)                            \
+    || defined(CONFIG_BOARD_TYPE_M5_STICKC_PLUS_2)
 static void handle_screen_brightness(void)
 {
     static const char* LABELS[] = { "Min(1)", "Low(2)", "Medium(3)", "High(4)", "Max(5)" };
@@ -1740,6 +1729,15 @@ static void handle_screen_brightness(void)
     while (!done) {
         // wait for a GUI event
         gui_activity_wait_event(act, GUI_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0);
+
+#if defined(CONFIG_BOARD_TYPE_TTGO_TDISPLAY)
+        // Match TTGO value-selection direction to the rest of its numeric entry UI.
+        if (ev_id == GUI_WHEEL_LEFT_EVENT) {
+            ev_id = GUI_WHEEL_RIGHT_EVENT;
+        } else if (ev_id == GUI_WHEEL_RIGHT_EVENT) {
+            ev_id = GUI_WHEEL_LEFT_EVENT;
+        }
+#endif
 
         switch (ev_id) {
         case GUI_WHEEL_LEFT_EVENT:
@@ -1927,19 +1925,29 @@ static void handle_flip_orientation(void)
     }
 }
 
+#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_BOARD_TYPE_JADE_ANY)
+static void handle_camera_rotate(void)
+{
+    // Toggle the extra 180-degree camera image rotation - takes effect
+    // next time the camera is used
+    const uint8_t gui_flags = storage_get_gui_flags();
+    storage_set_gui_flags(gui_flags ^ GUI_FLAGS_CAMERA_ROTATED);
+}
+#endif
+
+#ifdef CONFIG_HAS_CAMERA
 static void handle_pinserver_scan(void)
 {
     if (keychain_has_pin()) {
         // Not allowed if wallet initialised
-        const char* message[] = { "Set Oracle not", "permitted once", "wallet initialized" };
-        await_error_activity(message, 3);
+        await_error_3("Set Oracle not", "permitted once", "wallet initialized");
         return;
     }
 
     char* type;
     uint8_t* data = NULL;
     size_t data_len = 0;
-    if (!bcur_scan_qr(NULL, &type, &data, &data_len, "blkstrm.com/oracle")) {
+    if (!bcur_scan_qr(NULL, &type, &data, &data_len, 0, "blkstrm.com/oracle")) {
         // Scan aborted
         JADE_ASSERT(!type);
         JADE_ASSERT(!data);
@@ -1947,8 +1955,7 @@ static void handle_pinserver_scan(void)
     }
 
     if (!type || strcasecmp(type, BCUR_TYPE_JADE_UPDPS) || !data || !data_len) {
-        const char* message[] = { "Failed to parse Oracle data" };
-        await_error_activity(message, 1);
+        await_error("Failed to parse Oracle data");
         goto cleanup;
     }
 
@@ -1957,28 +1964,26 @@ static void handle_pinserver_scan(void)
         goto cleanup;
     }
 
-    const char* message[] = { "Oracle details updated" };
-    await_message_activity(message, 1);
+    await_message("Oracle details updated");
 
 cleanup:
     free(type);
     free(data);
 }
+#endif // CONFIG_HAS_CAMERA
 
 static void handle_pinserver_reset(void)
 {
     if (keychain_has_pin()) {
         // Not allowed if wallet initialised
-        const char* message[] = { "Reset Oracle not", "permitted once", "wallet initialized" };
-        await_error_activity(message, 3);
+        await_error_3("Reset Oracle not", "permitted once", "wallet initialized");
         return;
     }
 
     const char* question[] = { "Reset Oracle details", "and certificate?" };
     if (await_yesno_activity("Reset Oracle", question, 2, false, NULL)) {
         if (!reset_pinserver()) {
-            const char* message[] = { "Error resetting Oracle" };
-            await_error_activity(message, 1);
+            await_error("Error resetting Oracle");
         }
     }
 }
@@ -1988,8 +1993,7 @@ static void handle_storage(void)
 {
     size_t entries_used, entries_free;
     if (!storage_get_stats(&entries_used, &entries_free)) {
-        const char* message[] = { "Error accessing storage!" };
-        await_error_activity(message, 1);
+        await_error("Error accessing storage!");
         return;
     }
 
@@ -2048,6 +2052,7 @@ static void handle_display_mac_address(void)
     handle_info_detail_screen("MAC Address", mac);
 }
 
+#ifdef CONFIG_HAS_BATTERY
 static void handle_display_battery_volts(void)
 {
     char power_status[32] = "NO BAT";
@@ -2074,6 +2079,7 @@ static void handle_display_battery_volts(void)
 
     handle_info_detail_screen("Battery Volts", power_status);
 }
+#endif // CONFIG_HAS_BATTERY
 
 static void update_network_menu_label(gui_view_node_t* network_type_item)
 {
@@ -2293,9 +2299,10 @@ static void handle_settings(const bool startup_menu)
             break;
 #endif
 
-// NOTE: Only Jade v1.1's and v2's have brightness controls
+// NOTE: Only boards listed here have brightness controls
 #if defined(CONFIG_BOARD_TYPE_JADE_V1_1) || defined(CONFIG_BOARD_TYPE_JADE_V2_ANY)                                     \
-    || defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2)
+    || defined(CONFIG_BOARD_TYPE_WS_TOUCH_LCD2) || defined(CONFIG_BOARD_TYPE_TTGO_TDISPLAY)                            \
+    || defined(CONFIG_BOARD_TYPE_M5_STICKC_PLUS_2)
         case BTN_SETTINGS_DISPLAY_BRIGHTNESS:
             handle_screen_brightness();
             break;
@@ -2304,6 +2311,14 @@ static void handle_settings(const bool startup_menu)
         case BTN_SETTINGS_DISPLAY_ORIENTATION:
             handle_flip_orientation();
             break;
+
+#if defined(CONFIG_HAS_CAMERA) && !defined(CONFIG_BOARD_TYPE_JADE_ANY)
+        case BTN_SETTINGS_DISPLAY_CAMERA_ROTATE:
+            handle_camera_rotate();
+            // remake parent screen to update the menu item label
+            act = make_display_settings_activity();
+            break;
+#endif
 
         case BTN_SETTINGS_DISPLAY_THEME:
             handle_display_theme();
@@ -2368,8 +2383,7 @@ static void handle_settings(const bool startup_menu)
                 tolerate_usb_disconnection = true;
                 done = usbstorage_firmware_ota(NULL);
             } else {
-                const char* message[] = { "Unlock with PIN before", "initiating firmware update" };
-                await_error_activity(message, 2);
+                await_error_2("Unlock with PIN before", "initiating firmware update");
             }
             break;
 
@@ -2717,6 +2731,9 @@ void dashboard_process(void* process_ptr)
     device_name = get_jade_id();
     JADE_ASSERT(device_name);
 
+    // Migrate to an empty activity, to free the splash screen
+    gui_set_current_activity_ex(gui_make_activity(), true);
+
     // NOTE: Create 'Ready' screen for when Jade is unlocked and ready to use early, so that
     // it does not fragment the RAM (since it is long-lived).
     // NOTE: The main home screen is created as an 'unmanaged' activity, so it is not placed
@@ -2729,8 +2746,6 @@ void dashboard_process(void* process_ptr)
     gui_view_node_t* label = NULL;
     gui_activity_t* const act_home = make_home_screen_activity(device_name, running_app_info.version,
         &home_screen_selected_entry, &home_screen_next_entry, &status_light, &status_text, &label);
-#ifndef CONFIG_LIBJADE_NO_GUI
-    // If no GUI is enabled, we do not expect these elements to be set
     JADE_ASSERT(home_screen_selected_entry.symbol);
     JADE_ASSERT(home_screen_selected_entry.text);
     JADE_ASSERT(home_screen_next_entry.symbol);
@@ -2738,7 +2753,6 @@ void dashboard_process(void* process_ptr)
     JADE_ASSERT(status_light);
     JADE_ASSERT(status_text);
     JADE_ASSERT(label);
-#endif // CONFIG_LIBJADE_NO_GUI
 
     // We may as well associate the long-lived event data with this activity also
     wait_event_data_t* const event_data = gui_activity_make_wait_event_data(act_home);
