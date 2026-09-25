@@ -2128,10 +2128,26 @@ static void render_qrguide(gui_view_node_t* node)
     const uint16_t glength = 30;
     const uint16_t gnubbin = 2;
 
-    // maximum square that fits in the constraints
+    // The camera activity splits this same area 20/60/20 vertically - see
+    // make_camera_activity().  The bottom band may hold a progress bar, and the
+    // top band holds the exit and help/click buttons, in the outer 15% of the
+    // width on either side.  Keep the guide clear of both.
     const uint16_t width = cs->x2 - cs->x1;
-    const uint16_t height = cs->y2 - cs->y1;
-    const uint16_t square_size = min_u16(width, height);
+    const uint16_t full_height = cs->y2 - cs->y1;
+    const uint16_t vband = full_height / 5;
+    const uint16_t hbtn = (width * 15) / 100;
+
+    // Largest square that fits clear of the bottom band ...
+    uint16_t height = full_height - vband;
+    uint16_t square_size = min_u16(width, height);
+    uint16_t voffset = 0;
+
+    // ... and clear of the header buttons, if it would otherwise reach them
+    if ((width - square_size) / 2 < hbtn) {
+        height = full_height - (2 * vband);
+        square_size = min_u16(width, height);
+        voffset = vband;
+    }
 #if defined(CONFIG_BOARD_TYPE_JADE_V1_ANY)
     // guides 9% inset
     const uint16_t inset = square_size / 11;
@@ -2142,8 +2158,8 @@ static void render_qrguide(gui_view_node_t* node)
     // guide boundaries
     const uint16_t left = cs->x1 + (width - square_size) / 2 + inset;
     const uint16_t right = cs->x2 - (width - square_size) / 2 - inset;
-    const uint16_t top = cs->y1 + (height - square_size) / 2 + inset;
-    const uint16_t bottom = cs->y2 - (height - square_size) / 2 - inset;
+    const uint16_t top = cs->y1 + voffset + (height - square_size) / 2 + inset;
+    const uint16_t bottom = cs->y2 - vband - (height - square_size) / 2 - inset;
 
     const struct view_node_qrguide_data* data = node_get_qrguide_data(node);
     // top-left
