@@ -65,15 +65,12 @@ static bool qr_extract_payload(qr_data_t* qr_data)
     return false;
 }
 
-// Look for qr-codes, and if found extract any string data into the camera_data passed
-static bool qr_recognize(
-    const size_t width, const size_t height, const uint8_t* data, const size_t len, void* ctx_qr_data)
+// Copy the image (or its central area) into quirc's own buffer
+static void qr_load_image(
+    const size_t width, const size_t height, const uint8_t* data, const size_t len, qr_data_t* qr_data)
 {
     JADE_ASSERT(data);
-    JADE_ASSERT(ctx_qr_data);
     JADE_ASSERT(len == width * height);
-
-    qr_data_t* const qr_data = (qr_data_t*)ctx_qr_data;
     JADE_ASSERT(qr_data);
     JADE_ASSERT(qr_data->q);
 
@@ -96,6 +93,13 @@ static bool qr_recognize(
         }
     }
     quirc_end(qr_data->q);
+}
+
+// Look for qr-codes in the image loaded into quirc, and if found extract any string data
+// into the qr_data passed
+static bool qr_decode(qr_data_t* qr_data)
+{
+    JADE_ASSERT(qr_data);
 
     // If no QR data can be recognised/extracted, return false
     if (!qr_extract_payload(qr_data) || !qr_data->len) {
@@ -117,6 +121,22 @@ static bool qr_recognize(
     // QR data was extracted and validated - return true
     return true;
 }
+
+#ifdef CONFIG_HAS_CAMERA
+// Camera callback: look for qr-codes in the frame, and if found extract any string data into
+// the qr_data passed.  The frame is returned to the camera as soon as it has been copied, as
+// decoding and validating (eg. bc-ur reassembly) may take a while.
+static bool qr_recognize(
+    const size_t width, const size_t height, const uint8_t* data, const size_t len, void* ctx_qr_data)
+{
+    JADE_ASSERT(ctx_qr_data);
+    qr_data_t* const qr_data = (qr_data_t*)ctx_qr_data;
+
+    qr_load_image(width, height, data, len, qr_data);
+    jade_camera_release_frame();
+    return qr_decode(qr_data);
+}
+#endif // CONFIG_HAS_CAMERA
 
 #ifdef CONFIG_DEBUG_MODE
 // Function to scan single image - may be useful for testing
@@ -141,7 +161,8 @@ bool scan_qr(const size_t width, const size_t height, const uint8_t* data, const
     qr_data->ds = JADE_MALLOC_PREFER_DRAM(sizeof(struct datastream));
     qr_data->ds->data = JADE_MALLOC_PREFER_DRAM(QUIRC_MAX_PAYLOAD * sizeof(uint8_t));
 
-    const bool ret = qr_recognize(width, height, data, len, qr_data);
+    qr_load_image(width, height, data, len, qr_data);
+    const bool ret = qr_decode(qr_data);
 
     // Destroy the quirc structs created above
     free(qr_data->ds->data);

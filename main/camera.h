@@ -46,4 +46,9 @@ void jade_camera_process_images(camera_process_fn_t fn, void* ctx, bool show_ui,
 // Safe to call when no camera task is running (it will be a no-op).
 void camera_stop(void);
 
+// May be called by a processing callback running on every frame, once it has copied out what
+// it needs from the frame data, to return the frame buffer to the camera straight away rather
+// than when the callback returns.  The frame data must not be read after this call.
+void jade_camera_release_frame(void);
+
 #endif /* CAMERA_H_ */
