@@ -362,11 +362,49 @@ static void update_home_screen_menu_entry(home_menu_entry_t* entry, const home_m
     gui_update_text(entry->text, item->text);
 }
 
+// With direct touch the home screen menu is a strip with two ends, rather than a loop
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+#define HOME_SCREEN_MENU_WRAPS false
+#else
+#define HOME_SCREEN_MENU_WRAPS true
+#endif
+
+// Move to the next or previous menu item, skipping over any unused entries (null text).
+// Returns false, leaving 'item' unchanged, if there is none (at either end, when not wrapping).
+static bool step_home_screen_menu_item(uint8_t* item, const bool forward)
+{
+    JADE_ASSERT(item);
+    const size_t nbtns = sizeof(home_menu_items[0]) / sizeof(home_menu_items[0][0]);
+    uint8_t next = *item;
+    do {
+        if (!HOME_SCREEN_MENU_WRAPS && (forward ? next + 1 >= nbtns : next == 0)) {
+            return false;
+        }
+        next = forward ? (next + 1) % nbtns : (next + nbtns - 1) % nbtns;
+    } while (!home_menu_items[home_screen_type][next].text);
+    *item = next;
+    return true;
+}
+
 static void update_home_screen_menu(void)
 {
     const home_menu_item_t* next_item = NULL;
     const home_menu_item_t* selected_item = get_selected_home_screen_menu_item(&next_item);
     update_home_screen_menu_entry(&home_screen_selected_entry, selected_item);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // At the end of the menu there is no next item - leave its place blank
+    uint8_t next = home_screen_menu_item;
+    const bool has_next = step_home_screen_menu_item(&next, true);
+    const color_t next_color = has_next ? GUI_BLOCKSTREAM_UNHIGHTLIGHTED_DEFAULT : TFT_BLACK;
+    gui_set_color(home_screen_next_entry.symbol->parent, next_color);
+    gui_set_color(home_screen_next_entry.text->parent, next_color);
+    if (!has_next) {
+        gui_update_text(home_screen_next_entry.symbol, "");
+        gui_update_text(home_screen_next_entry.text, "");
+        return;
+    }
+    next_item = &home_menu_items[home_screen_type][next];
+#endif
     update_home_screen_menu_entry(&home_screen_next_entry, next_item);
 }
 
@@ -2680,22 +2718,15 @@ static void do_dashboard(jade_process_t* process, const keychain_t* const initia
                     acted = true;
                 } else if (ev_base == GUI_EVENT) {
                     // Low-level gui event from the generic home screen
-                    const size_t nbtns = sizeof(home_menu_items[0]) / sizeof(home_menu_items[0][0]);
                     const home_menu_item_t* menu_item = NULL;
                     if (ev_id == GUI_WHEEL_LEFT_EVENT) {
-                        // Back, but skip over any unused menu-item entries (null text)
-                        do {
-                            home_screen_menu_item = (home_screen_menu_item + nbtns - 1) % nbtns;
-                            menu_item = get_selected_home_screen_menu_item(NULL);
-                        } while (!menu_item->text);
-                        update_home_screen_menu();
+                        if (step_home_screen_menu_item(&home_screen_menu_item, false)) {
+                            update_home_screen_menu();
+                        }
                     } else if (ev_id == GUI_WHEEL_RIGHT_EVENT) {
-                        // Next, but skip over any unused menu-item entries (null text)
-                        do {
-                            home_screen_menu_item = (home_screen_menu_item + 1) % nbtns;
-                            menu_item = get_selected_home_screen_menu_item(NULL);
-                        } while (!menu_item->text);
-                        update_home_screen_menu();
+                        if (step_home_screen_menu_item(&home_screen_menu_item, true)) {
+                            update_home_screen_menu();
+                        }
                     } else if (ev_id == gui_get_click_event()) {
                         // Click - handle the current button's event
                         main_thread_action = MAIN_THREAD_ACTIVITY_UI_MENU;
