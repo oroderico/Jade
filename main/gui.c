@@ -608,7 +608,11 @@ void gui_activity_set_active_selection(gui_activity_t* activity, gui_view_node_t
         set_tree_active(nodes[i], active[i]);
         if (nodes[i] == selected) {
             JADE_ASSERT(active[i]); // can only select active node
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+            // With direct touch nothing is selected up front (see render_activity())
+#else
             select_node(nodes[i]);
+#endif
             set_selected = true;
         }
     }
