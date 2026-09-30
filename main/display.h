@@ -115,6 +115,7 @@ void display_picture(const Picture* imgbuf, int x, int y, const dispWin_t* const
 void display_fill_rect(int x, int y, int w, int h, color_t color);
 void display_icon(const Icon* imgbuf, int x, int y, color_t color, const dispWin_t* const cs, const color_t* bg_color);
 void display_print_in_area(const char* st, int x, int y, const dispWin_t* cs, bool wrap);
+void display_print_clipped(const char* st, int x, int y, int max_x, const dispWin_t* clip);
 int display_get_string_width(const char* str);
 void display_set_font(uint8_t font);
 int display_get_font_height(void);

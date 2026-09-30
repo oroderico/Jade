@@ -583,8 +583,14 @@ void display_icon(const Icon* imgbuf, int x, int y, color_t color, const dispWin
 #endif
 }
 
+// Optional clip window for printed characters (see display_print_clipped())
+static const dispWin_t* print_clip = NULL;
+
 static inline bool is_within_limits(int cx, int cy)
 {
+    if (print_clip && (cx < print_clip->x1 || cx >= print_clip->x2 || cy < print_clip->y1 || cy >= print_clip->y2)) {
+        return false;
+    }
     // Allow for characters to be printed in the virtual button area
 #ifndef CONFIG_DISPLAY_TOUCHSCREEN
     if ((cx < CONFIG_DISPLAY_OFFSET_X) || (cy < CONFIG_DISPLAY_OFFSET_Y)
@@ -920,6 +926,42 @@ void display_print_in_area(const char* st, int x, int y, const dispWin_t* const 
             }
         }
     }
+}
+
+// Print a single line of text at x, y, which may be partly (or wholly) off the screen,
+// drawing only the pixels inside the clip window.  As display_print_in_area(), stops at
+// the first character that would not fit before max_x.
+void display_print_clipped(const char* st, int x, const int y, const int max_x, const dispWin_t* clip)
+{
+    JADE_ASSERT(st);
+    JADE_ASSERT(clip);
+    if (!cfont.bitmap) {
+        return;
+    }
+
+    print_clip = clip;
+    for (const char* p = st; *p; ++p) {
+        if (!cfont.x_size) {
+            if (!get_char_ptr(*p, &fontChar)) {
+                continue;
+            }
+            if (x + fontChar.xDelta > max_x) {
+                break;
+            }
+            x += print_proportional_char(x, y) + 1;
+        } else {
+            if (x + cfont.x_size > max_x) {
+                break;
+            }
+            uint8_t ch = *p;
+            if ((ch < cfont.offset) || ((ch - cfont.offset) > cfont.numchars)) {
+                ch = cfont.offset;
+            }
+            print_char(ch, x, y);
+            x += cfont.x_size;
+        }
+    }
+    print_clip = NULL;
 }
 
 // Macros to convert a grayscale 0-255 index to big-endian 565 RGB
