@@ -2779,6 +2779,10 @@ void dashboard_process(void* process_ptr)
     JADE_ASSERT(status_light);
     JADE_ASSERT(status_text);
     JADE_ASSERT(label);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // The navbar 'home' button goes back until this screen is reached
+    gui_set_home_activity(act_home);
+#endif
 
     // We may as well associate the long-lived event data with this activity also
     wait_event_data_t* const event_data = gui_activity_make_wait_event_data(act_home);

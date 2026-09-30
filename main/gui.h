@@ -247,6 +247,8 @@ struct view_node_button_data {
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
     // if set, direct touch requires a long press to activate the button
     bool is_critical;
+    // if set, the button is the screen's (hidden) 'back' button, activated by the navbar
+    bool is_back;
 #endif
 };
 
@@ -431,6 +433,7 @@ void gui_make_vsplit(gui_view_node_t** ptr, enum gui_split_type kind, int parts,
 void gui_make_button(gui_view_node_t** ptr, color_t color, color_t selected_color, uint32_t event_id, void* args);
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
 void gui_set_button_critical(gui_view_node_t* node);
+void gui_set_button_back(gui_view_node_t* node);
 #endif
 void gui_make_fill(gui_view_node_t** ptr, color_t color, enum fill_node_kind fill_type, gui_view_node_t* parent);
 void gui_make_text(gui_view_node_t** ptr, const char* text, color_t color);
@@ -493,6 +496,9 @@ void gui_prev(void);
 void gui_touch_update(uint16_t x, uint16_t y, bool is_pressed);
 void gui_activity_set_touch_nav_area(gui_activity_t* activity, gui_view_node_t* area);
 void gui_activity_set_touch_nav_select_area(gui_activity_t* activity, gui_view_node_t* select_area);
+void gui_set_home_activity(gui_activity_t* activity);
+void gui_nav_back(void);
+void gui_nav_home(void);
 #endif
 
 #endif /* GUI_H_ */

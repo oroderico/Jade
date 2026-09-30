@@ -254,6 +254,15 @@ void display_touch_navbar_redraw(void)
         .y2 = (CONFIG_DISPLAY_HEIGHT + (TOUCH_BUTTON_AREA - TOUCH_BUTTON_MARGIN)) + CONFIG_DISPLAY_OFFSET_Y };
 
     display_set_font(JADE_SYMBOLS_16x16_FONT);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // With direct touch the gui is tapped for prev/select/next, so the navbar
+    // only has 'back' (replacing the screens' own back arrows) and 'home'
+    display_print_in_area("=", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+    disp_win_virtual_buttons.x1
+        = ((CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X) - TOUCH_BUTTON_WIDTH;
+    disp_win_virtual_buttons.x2 = (CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X;
+    display_print_in_area("Q", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+#else
     display_print_in_area("H", CENTER, CENTER, &disp_win_virtual_buttons, 0);
     disp_win_virtual_buttons.x1 = ((CONFIG_DISPLAY_WIDTH / 2) + CONFIG_DISPLAY_OFFSET_X) - (TOUCH_BUTTON_WIDTH / 2);
     disp_win_virtual_buttons.x2 = ((CONFIG_DISPLAY_WIDTH / 2) + CONFIG_DISPLAY_OFFSET_X) + (TOUCH_BUTTON_WIDTH / 2);
@@ -262,6 +271,7 @@ void display_touch_navbar_redraw(void)
         = ((CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X) - TOUCH_BUTTON_WIDTH;
     disp_win_virtual_buttons.x2 = (CONFIG_DISPLAY_WIDTH - TOUCH_BUTTON_MARGIN) + CONFIG_DISPLAY_OFFSET_X;
     display_print_in_area("I", CENTER, CENTER, &disp_win_virtual_buttons, 0);
+#endif
     display_set_font(DEFAULT_FONT);
 }
 #endif

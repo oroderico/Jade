@@ -1154,6 +1154,14 @@ void gui_set_button_critical(gui_view_node_t* node)
     JADE_ASSERT(node && node->kind == BUTTON);
     node_get_button_data(node)->is_critical = true;
 }
+
+// Mark a button as the screen's 'back' button - direct touch hides it, and the
+// navbar 'back' button activates it instead
+void gui_set_button_back(gui_view_node_t* node)
+{
+    JADE_ASSERT(node && node->kind == BUTTON);
+    node_get_button_data(node)->is_back = true;
+}
 #endif
 
 void gui_make_fill(gui_view_node_t** ptr, color_t color, enum fill_node_kind fill_type, gui_view_node_t* parent)
@@ -1863,6 +1871,12 @@ static void render_button(gui_view_node_t* node)
     // NOTE: requires the parent is redrawn otherwise button will remain in 'selected' appearance
     // when selection moves on to another item.
     const struct view_node_button_data* data = node_get_button_data(node);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // The hidden 'back' button is never drawn, even if selected (see gui_set_button_back())
+    if (data->is_back) {
+        return;
+    }
+#endif
     if (node->is_selected || data->color != data->selected_color) {
         display_fill_rect(
             cs->x1, cs->y1, cs->x2 - cs->x1, cs->y2 - cs->y1, node->is_selected ? data->selected_color : data->color);
@@ -2723,7 +2737,9 @@ static gui_view_node_t* find_node_at_point(gui_activity_t* activity, const uint1
     selectable_t* const begin = activity->selectables;
     selectable_t* current = begin;
     do {
-        if (current->node->is_active && is_point_in_node(current->node, x, y)) {
+        // The hidden 'back' button is only activated by the navbar
+        if (current->node->is_active && !node_get_button_data(current->node)->is_back
+            && is_point_in_node(current->node, x, y)) {
             return current->node;
         }
         current = current->next;
@@ -2750,9 +2766,29 @@ void gui_activity_set_touch_nav_select_area(gui_activity_t* activity, gui_view_n
     activity->touch_nav_select_area = select_area;
 }
 
+// Whether the activity has any button that can be tapped (ie. other than a hidden 'back' button)
+static bool has_tappable_buttons(const gui_activity_t* activity)
+{
+    if (!activity->selectables) {
+        return false;
+    }
+
+    // NOTE: the selectables list is circular, so stop when back at the start
+    const selectable_t* const begin = activity->selectables;
+    const selectable_t* current = begin;
+    do {
+        if (current->node->is_active && !node_get_button_data(current->node)->is_back) {
+            return true;
+        }
+        current = current->next;
+    } while (current != begin);
+
+    return false;
+}
+
 static void touch_nav_tap(const gui_activity_t* activity, const uint16_t x, const uint16_t y)
 {
-    if (!activity || activity->selectables || !activity->touch_nav_area
+    if (!activity || has_tappable_buttons(activity) || !activity->touch_nav_area
         || !is_point_in_node(activity->touch_nav_area, x, y)) {
         return;
     }
@@ -2779,6 +2815,118 @@ static void touch_nav_tap(const gui_activity_t* activity, const uint16_t x, cons
     }
 }
 
+// The navbar 'back' button activates the screen's hidden 'back' button, if it has one
+static bool post_back_event(gui_activity_t* activity)
+{
+    if (!activity) {
+        return false;
+    }
+
+    bool found = false;
+    uint32_t ev_id = GUI_BUTTON_EVENT_NONE;
+    void* args = NULL;
+
+    JADE_SEMAPHORE_TAKE(gui_mutex);
+    if (activity->selectables) {
+        // NOTE: the selectables list is circular, so stop when back at the start
+        const selectable_t* const begin = activity->selectables;
+        const selectable_t* current = begin;
+        do {
+            const struct view_node_button_data* const data = node_get_button_data(current->node);
+            if (current->node->is_active && data->is_back && data->click_event_id != GUI_BUTTON_EVENT_NONE) {
+                ev_id = data->click_event_id;
+                args = data->args;
+                found = true;
+                break;
+            }
+            current = current->next;
+        } while (current != begin);
+    }
+    JADE_SEMAPHORE_GIVE(gui_mutex);
+
+    if (!found) {
+        return false;
+    }
+    return esp_event_post(GUI_BUTTON_EVENT, ev_id, &args, sizeof(void*), 100 / portTICK_PERIOD_MS) == ESP_OK;
+}
+
+void gui_nav_back(void)
+{
+    if (!idletimer_register_activity(true)) {
+        post_back_event(current_activity);
+    }
+}
+
+// The navbar 'home' button goes 'back' repeatedly until the home screen is reached.
+// It gives up on a screen without a 'back' button that does not move on by itself,
+// and on reaching a screen already stepped back from (eg. an 'are you sure?' prompt
+// whose 'back' returns to the previous screen).
+#define GUI_NAV_HOME_MAX_STEPS 16
+#define GUI_NAV_HOME_TIMEOUT_MS 2000
+
+static gui_activity_t* home_activity = NULL;
+
+typedef struct {
+    bool is_pending;
+    bool is_stepped; // 'back' sent on the current screen
+    gui_activity_t* seen; // the current screen
+    TickType_t seen_at;
+    gui_activity_t* stepped[GUI_NAV_HOME_MAX_STEPS];
+    size_t num_stepped;
+} nav_home_t;
+static nav_home_t nav_home = { 0 };
+
+void gui_set_home_activity(gui_activity_t* activity)
+{
+    JADE_ASSERT(activity);
+    home_activity = activity;
+}
+
+void gui_nav_home(void)
+{
+    if (!idletimer_register_activity(true) && home_activity) {
+        nav_home = (nav_home_t){ .is_pending = true };
+    }
+}
+
+// Called on every touchscreen poll to move a pending 'home' along
+static void nav_home_step(void)
+{
+    if (!nav_home.is_pending) {
+        return;
+    }
+
+    gui_activity_t* const activity = current_activity;
+    if (activity == home_activity) {
+        nav_home = (nav_home_t){ 0 };
+        return;
+    }
+
+    const TickType_t now = xTaskGetTickCount();
+    if (activity != nav_home.seen) {
+        nav_home.seen = activity;
+        nav_home.seen_at = now;
+        nav_home.is_stepped = false;
+    }
+
+    if (!nav_home.is_stepped) {
+        for (size_t i = 0; i < nav_home.num_stepped; ++i) {
+            if (nav_home.stepped[i] == activity) {
+                nav_home = (nav_home_t){ 0 };
+                return;
+            }
+        }
+        if (nav_home.num_stepped < GUI_NAV_HOME_MAX_STEPS && post_back_event(activity)) {
+            nav_home.stepped[nav_home.num_stepped++] = activity;
+            nav_home.is_stepped = true;
+        }
+    }
+
+    if (now - nav_home.seen_at >= pdMS_TO_TICKS(GUI_NAV_HOME_TIMEOUT_MS)) {
+        nav_home = (nav_home_t){ 0 };
+    }
+}
+
 // Called on every touchscreen poll with the current touch state - 'is_pressed'
 // is false for presses that started on the virtual button strip, as those are
 // the classic prev/select/next buttons, handled by the input code.
@@ -2788,6 +2936,8 @@ static void touch_nav_tap(const gui_activity_t* activity, const uint16_t x, cons
 void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
 {
     const uint16_t hit_x = gui_orientation_flipped ? CONFIG_DISPLAY_WIDTH - x : x;
+
+    nav_home_step();
 
     if (is_pressed && !touch_press.is_pressed) {
         // Press started - on a dimmed screen it only wakes the screen

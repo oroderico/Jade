@@ -31,8 +31,25 @@ void power_i2c_bus_attach(i2c_master_bus_handle_t bus);
 void power_i2c_bus_detach(void);
 #endif
 
-enum touch_zone { ZONE_NONE, ZONE_PREV, ZONE_CLICK, ZONE_NEXT };
+enum touch_zone { ZONE_NONE, ZONE_PREV, ZONE_CLICK, ZONE_NEXT, ZONE_BACK, ZONE_HOME };
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+// With direct touch the navbar only has 'back' and 'home', in the two halves of the
+// display width, again with a small dead zone between them.
+static enum touch_zone get_touch_zone(const uint16_t x)
+{
+    const uint16_t half = CONFIG_DISPLAY_WIDTH / 2;
+    const uint16_t margin = CONFIG_DISPLAY_WIDTH / 24;
+
+    if (x < half - margin) {
+        return ZONE_BACK;
+    }
+    if (x > half + margin) {
+        return ZONE_HOME;
+    }
+    return ZONE_NONE;
+}
+#else
 // Which navbar zone (thirds of the display width) the given x coordinate falls in.  A small
 // dead zone around the two boundaries counts as no zone, so a touch that lands close to one
 // does nothing rather than snapping to whichever side it happens to fall on.
@@ -53,6 +70,7 @@ static enum touch_zone get_touch_zone(const uint16_t x)
     }
     return ZONE_NONE;
 }
+#endif
 
 static void touch_zone_action(const enum touch_zone zone)
 {
@@ -66,6 +84,18 @@ static void touch_zone_action(const enum touch_zone zone)
     case ZONE_NEXT:
         gui_next();
         break;
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    case ZONE_BACK:
+        gui_nav_back();
+        break;
+    case ZONE_HOME:
+        gui_nav_home();
+        break;
+#else
+    case ZONE_BACK:
+    case ZONE_HOME:
+        break;
+#endif
     case ZONE_NONE:
         break;
     }

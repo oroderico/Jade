@@ -70,6 +70,19 @@ void add_button(gui_view_node_t* parent, btn_data_t* btn_info)
 
     gui_view_node_t* btn;
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // The 'back' arrow is replaced by the navbar 'back' button - keep the button, so the
+    // navbar can activate it, but without any content (it is not drawn at all)
+    if (btn_info->ev_id != GUI_BUTTON_EVENT_NONE && btn_info->txt && !strcmp(btn_info->txt, "=")
+        && btn_info->font == JADE_SYMBOLS_16x16_FONT) {
+        gui_make_button(&btn, TFT_BLACK, TFT_BLACK, btn_info->ev_id, NULL);
+        gui_set_parent(btn, parent);
+        gui_set_button_back(btn);
+        btn_info->btn = btn;
+        return;
+    }
+#endif
+
     // No event implies no 'pressable' button in this position - use an empty 'vsplit' as a spacer
     if (btn_info->ev_id == GUI_BUTTON_EVENT_NONE) {
         gui_make_vsplit(&btn, GUI_SPLIT_RELATIVE, 1, 100); // no-op spacer
