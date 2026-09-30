@@ -2328,6 +2328,13 @@ static void render_activity(gui_activity_t* activity)
     const bool first_time = activity->root_node->is_first_render;
     render_node(activity->root_node, &activity->win);
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // With direct touch nothing is selected up front - a button is only
+    // shown selected while it is pressed
+    if (first_time) {
+        return;
+    }
+#endif
     if (first_time && activity->selectables) {
         // If the activity has an 'initial_selection' and it appears active, select it now
         // If not, select the first active item
@@ -2991,10 +2998,21 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
 
     // Press released - a tap on a (non-critical) button activates it, while a
     // tap on a screen with nothing to tap may act as prev/select/next
-    if (!touch_press.is_done && touch_press.node) {
-        if (touch_press.is_on_node && !node_get_button_data(touch_press.node)->is_critical
+    if (touch_press.node) {
+        if (!touch_press.is_done && touch_press.is_on_node && !node_get_button_data(touch_press.node)->is_critical
             && touch_press.node->is_selected) {
             gui_front_click();
+        }
+        // Nothing stays selected once the finger is lifted.  NOTE: the node is only
+        // safe to use while its activity is current, which the gui_mutex ensures.
+        JADE_SEMAPHORE_TAKE(gui_mutex);
+        const bool deselect = current_activity == touch_press.activity && touch_press.node->is_selected;
+        if (deselect) {
+            set_tree_selection(touch_press.node, false);
+        }
+        JADE_SEMAPHORE_GIVE(gui_mutex);
+        if (deselect) {
+            gui_repaint(touch_press.node);
         }
     } else if (!touch_press.is_done && !touch_press.has_moved) {
         touch_nav_tap(touch_press.activity, touch_press.x, touch_press.y);
