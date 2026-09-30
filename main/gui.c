@@ -1,5 +1,6 @@
 #ifndef AMALGAMATED_BUILD
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <freertos/FreeRTOS.h>
@@ -2709,6 +2710,9 @@ void gui_prev(void)
 // A press that moves more than this from where it started is no longer a tap
 #define GUI_TOUCH_DELTA 15
 
+// A mostly horizontal press that moves at least this far is a swipe
+#define GUI_TOUCH_SWIPE_MIN 40
+
 // The press being tracked
 typedef struct {
     gui_activity_t* activity;
@@ -2819,6 +2823,25 @@ static void touch_nav_tap(const gui_activity_t* activity, const uint16_t x, cons
         select_next_right();
     } else {
         gui_front_click();
+    }
+}
+
+// A swipe on a screen with nothing to tap acts as prev/next: moving the finger
+// left brings in the next item, moving it right the previous one
+static void touch_nav_swipe(const gui_activity_t* activity, const int dx, const int dy)
+{
+    if (!activity || has_tappable_buttons(activity) || !activity->touch_nav_area) {
+        return;
+    }
+    if (abs(dx) < GUI_TOUCH_SWIPE_MIN || abs(dx) < 2 * abs(dy)) {
+        return;
+    }
+
+    // NOTE: as with taps, act on where the gui is drawn (see touch_nav_tap())
+    if (dx < 0) {
+        select_next_right();
+    } else {
+        select_prev_left();
     }
 }
 
@@ -2997,7 +3020,8 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
     }
 
     // Press released - a tap on a (non-critical) button activates it, while a
-    // tap on a screen with nothing to tap may act as prev/select/next
+    // tap or swipe on a screen with nothing to tap may act as prev/select/next.
+    // NOTE: once the finger is lifted x/y keep its last position.
     if (touch_press.node) {
         if (!touch_press.is_done && touch_press.is_on_node && !node_get_button_data(touch_press.node)->is_critical
             && touch_press.node->is_selected) {
@@ -3016,6 +3040,8 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
         }
     } else if (!touch_press.is_done && !touch_press.has_moved) {
         touch_nav_tap(touch_press.activity, touch_press.x, touch_press.y);
+    } else if (!touch_press.is_done) {
+        touch_nav_swipe(touch_press.activity, (int)hit_x - touch_press.x, (int)y - touch_press.y);
     }
     touch_press = (touch_press_t){ 0 };
 }
