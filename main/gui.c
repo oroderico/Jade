@@ -2857,49 +2857,72 @@ static void touch_nav_swipe(const gui_activity_t* activity, const int dx, const 
     }
 }
 
-// The navbar 'back' button activates the screen's hidden 'back' button, if it has one
-static bool post_back_event(gui_activity_t* activity)
+// A screen without a back button can take the navbar 'back' and 'home' buttons as
+// events of its own (eg. a keyboard, where 'back' goes to the previous item and 'home'
+// abandons the entry).  GUI_BUTTON_EVENT_NONE for either leaves that button unused.
+void gui_activity_set_nav_events(
+    gui_activity_t* activity, esp_event_base_t base, const uint32_t back_event_id, const uint32_t home_event_id)
+{
+    JADE_ASSERT(activity);
+    JADE_ASSERT(base);
+    activity->nav_event_base = base;
+    activity->nav_back_event_id = back_event_id;
+    activity->nav_home_event_id = home_event_id;
+}
+
+// The navbar 'back' button activates the screen's hidden 'back' button if it has one, or
+// else posts the screen's own 'back' event, if any.  For the navbar 'home' button, any
+// 'home' event of the screen is posted instead, if it has one.
+static bool post_nav_event(gui_activity_t* activity, const bool home)
 {
     if (!activity) {
         return false;
     }
 
-    bool found = false;
+    esp_event_base_t base = NULL;
     uint32_t ev_id = GUI_BUTTON_EVENT_NONE;
     void* args = NULL;
 
     JADE_SEMAPHORE_TAKE(gui_mutex);
-    if (activity->selectables) {
+    if (home && activity->nav_event_base && activity->nav_home_event_id != GUI_BUTTON_EVENT_NONE) {
+        base = activity->nav_event_base;
+        ev_id = activity->nav_home_event_id;
+    } else if (activity->selectables) {
         // NOTE: the selectables list is circular, so stop when back at the start
         const selectable_t* const begin = activity->selectables;
         const selectable_t* current = begin;
         do {
             const struct view_node_button_data* const data = node_get_button_data(current->node);
             if (current->node->is_active && data->is_back && data->click_event_id != GUI_BUTTON_EVENT_NONE) {
+                base = GUI_BUTTON_EVENT;
                 ev_id = data->click_event_id;
                 args = data->args;
-                found = true;
                 break;
             }
             current = current->next;
         } while (current != begin);
     }
+    if (!base && activity->nav_event_base && activity->nav_back_event_id != GUI_BUTTON_EVENT_NONE) {
+        base = activity->nav_event_base;
+        ev_id = activity->nav_back_event_id;
+    }
     JADE_SEMAPHORE_GIVE(gui_mutex);
 
-    if (!found) {
+    if (!base) {
         return false;
     }
-    return esp_event_post(GUI_BUTTON_EVENT, ev_id, &args, sizeof(void*), 100 / portTICK_PERIOD_MS) == ESP_OK;
+    return esp_event_post(base, ev_id, &args, sizeof(void*), 100 / portTICK_PERIOD_MS) == ESP_OK;
 }
 
 void gui_nav_back(void)
 {
     if (!idletimer_register_activity(true)) {
-        post_back_event(current_activity);
+        post_nav_event(current_activity, false);
     }
 }
 
-// The navbar 'home' button goes 'back' repeatedly until the home screen is reached.
+// The navbar 'home' button goes 'back' repeatedly until the home screen is reached
+// (or posts a screen's own 'home' event, if it has one, see gui_activity_set_nav_events()).
 // It gives up on a screen without a 'back' button that does not move on by itself,
 // and on reaching a screen already stepped back from (eg. an 'are you sure?' prompt
 // whose 'back' returns to the previous screen).
@@ -2958,7 +2981,7 @@ static void nav_home_step(void)
                 return;
             }
         }
-        if (nav_home.num_stepped < GUI_NAV_HOME_MAX_STEPS && post_back_event(activity)) {
+        if (nav_home.num_stepped < GUI_NAV_HOME_MAX_STEPS && post_nav_event(activity, true)) {
             nav_home.stepped[nav_home.num_stepped++] = activity;
             nav_home.is_stepped = true;
         }

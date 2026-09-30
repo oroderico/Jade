@@ -653,7 +653,12 @@ static void write_wordlist_words(
     }
 }
 
-typedef enum { WORDLIST_WORD_SELECTED, WORDLIST_WORD_BACKSPACE, WORDLIST_WORD_DONE } wordlist_word_result_t;
+typedef enum {
+    WORDLIST_WORD_SELECTED,
+    WORDLIST_WORD_BACKSPACE,
+    WORDLIST_WORD_DONE,
+    WORDLIST_WORD_EXIT
+} wordlist_word_result_t;
 
 // Nodes shared by the keyboard and carousel used to select a BIP39 word.
 typedef struct {
@@ -668,7 +673,9 @@ typedef struct {
     gui_view_node_t* text_selection;
 } word_entry_ui_t;
 
-static void make_word_entry_ui(word_entry_ui_t* ui, const bool show_enter_btn, const char* select_word_title)
+// 'can_exit' is whether the entry can be abandoned (WORDLIST_WORD_EXIT), with direct touch
+static void make_word_entry_ui(
+    word_entry_ui_t* ui, const bool show_enter_btn, const bool can_exit, const char* select_word_title)
 {
     JADE_ASSERT(ui && select_word_title);
 
@@ -678,6 +685,15 @@ static void make_word_entry_ui(word_entry_ui_t* ui, const bool show_enter_btn, c
     ui->enter->is_active = show_enter_btn;
 
     ui->choose_word_activity = make_carousel_activity(select_word_title, &ui->label, &ui->text_selection);
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // Neither screen has a back button: the navbar 'back' goes back to the previous
+    // word, and 'home' abandons the entry (if allowed)
+    gui_activity_set_nav_events(ui->enter_word_activity, GUI_BUTTON_EVENT, BTN_KEYBOARD_PREV_WORD,
+        can_exit ? BTN_KEYBOARD_EXIT : GUI_BUTTON_EVENT_NONE);
+    gui_activity_set_nav_events(
+        ui->choose_word_activity, GUI_EVENT, GUI_NAV_BACK_EVENT, can_exit ? GUI_NAV_HOME_EVENT : GUI_BUTTON_EVENT_NONE);
+#endif
 }
 
 static wordlist_word_result_t select_wordlist_word(const bool is_mnemonic, const size_t word_index,
@@ -717,6 +733,8 @@ static wordlist_word_result_t select_wordlist_word(const bool is_mnemonic, const
             gui_update_text(ui->label, choose_word_title);
 
             bool stop = false;
+            bool has_nav_result = false;
+            wordlist_word_result_t nav_result = WORDLIST_WORD_DONE;
             size_t selected = random_first_selection_word ? get_uniform_random_byte(possible_words) : 0;
             const char* wordlist_extracted = NULL;
             while (!stop) {
@@ -750,6 +768,20 @@ static wordlist_word_result_t select_wordlist_word(const bool is_mnemonic, const
                     selected = (selected + 1) % (possible_words + 1);
                     break;
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+                case GUI_NAV_BACK_EVENT:
+                    // Back to the previous word
+                    nav_result = WORDLIST_WORD_BACKSPACE;
+                    has_nav_result = true;
+                    stop = true;
+                    break;
+
+                case GUI_NAV_HOME_EVENT:
+                    nav_result = WORDLIST_WORD_EXIT;
+                    has_nav_result = true;
+                    stop = true;
+                    break;
+#endif
                 default:
                     // Stop the loop on a 'click' event
                     stop = (ev_id == gui_get_click_event());
@@ -760,6 +792,11 @@ static wordlist_word_result_t select_wordlist_word(const bool is_mnemonic, const
                     wordlist_extracted = NULL;
                 }
             } // while !stop
+
+            if (has_nav_result) {
+                result = nav_result;
+                break;
+            }
 
             // Word (or backspace) selected
             JADE_ASSERT(selected <= possible_words);
@@ -821,6 +858,17 @@ static wordlist_word_result_t select_wordlist_word(const bool is_mnemonic, const
                 result = WORDLIST_WORD_DONE;
                 break;
             }
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+            if (ev_id == BTN_KEYBOARD_PREV_WORD) {
+                // Back to the previous word, dropping any letters entered for this one
+                result = WORDLIST_WORD_BACKSPACE;
+                break;
+            }
+            if (ev_id == BTN_KEYBOARD_EXIT) {
+                result = WORDLIST_WORD_EXIT;
+                break;
+            }
+#endif
             if (!selected_backspace) {
                 // Character/letter was clicked
                 const char letter_selected = ev_id - BTN_KEYBOARD_ASCII_OFFSET;
@@ -904,7 +952,7 @@ static size_t get_wordlist_words(
     const bool show_enter_btn = !is_mnemonic; // Don't show 'done' button when entering mnemonic words
     const char* select_word_title = purpose == WORDLIST_PASSPHRASE ? "Enter Passphrase" : "Recover Wallet";
     word_entry_ui_t ui = { 0 };
-    make_word_entry_ui(&ui, show_enter_btn, select_word_title);
+    make_word_entry_ui(&ui, show_enter_btn, is_mnemonic, select_word_title);
 
     JADE_ASSERT(ui.titletext);
     if (purpose == WORDLIST_PASSPHRASE) {
@@ -961,6 +1009,13 @@ static size_t get_wordlist_words(
         case WORDLIST_WORD_DONE:
             done_entering_words = true;
             break;
+
+        case WORDLIST_WORD_EXIT:
+            // Abandon mnemonic entry back to the previous screen
+            JADE_ASSERT(is_mnemonic);
+            SENSITIVE_POP(final_words);
+            SENSITIVE_POP(wordlist_words);
+            return 0; // no words entered
 
         case WORDLIST_WORD_BACKSPACE:
             if (word_index > 0) {
@@ -1028,7 +1083,7 @@ static size_t get_word_number_words(
     SENSITIVE_PUSH(&digit_entry, sizeof(digit_entry));
 
     word_entry_ui_t calc_ui = { 0 };
-    make_word_entry_ui(&calc_ui, false, "Recover Wallet");
+    make_word_entry_ui(&calc_ui, false, false, "Recover Wallet");
 
     gui_view_node_t* number_text_selection = NULL;
     gui_view_node_t* number_label = NULL;

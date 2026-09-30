@@ -94,7 +94,12 @@ typedef enum {
     GUI_FRONT_CLICK_EVENT,
 
     // Direct touch: a scroll moved by some number of items (see gui_take_touch_scroll_steps())
-    GUI_TOUCH_SCROLL_EVENT
+    GUI_TOUCH_SCROLL_EVENT,
+
+    // Direct touch: the navbar 'back' and 'home' buttons, for screens that ask for them
+    // (see gui_activity_set_nav_events())
+    GUI_NAV_BACK_EVENT,
+    GUI_NAV_HOME_EVENT
 } gui_event_t;
 
 // How should split values be interpreted
@@ -353,6 +358,12 @@ struct gui_activity_t {
     // the node in it that acts as 'select' (default: the middle third)
     gui_view_node_t* touch_nav_area;
     gui_view_node_t* touch_nav_select_area;
+
+    // Direct touch: events posted by the navbar 'back' and 'home' buttons, for
+    // screens without a (hidden) back button (see gui_activity_set_nav_events())
+    esp_event_base_t nav_event_base;
+    uint32_t nav_back_event_id;
+    uint32_t nav_home_event_id;
 #endif
 };
 
@@ -500,6 +511,8 @@ void gui_touch_update(uint16_t x, uint16_t y, bool is_pressed);
 void gui_activity_set_touch_nav_area(gui_activity_t* activity, gui_view_node_t* area);
 void gui_activity_set_touch_nav_select_area(gui_activity_t* activity, gui_view_node_t* select_area);
 void gui_set_home_activity(gui_activity_t* activity);
+void gui_activity_set_nav_events(
+    gui_activity_t* activity, esp_event_base_t base, uint32_t back_event_id, uint32_t home_event_id);
 void gui_nav_back(void);
 void gui_nav_home(void);
 // Gets the item's symbol and text, 'offset' items away from the selected one - returns false if there is none
