@@ -91,7 +91,10 @@ typedef enum {
     GUI_WHEEL_RIGHT_EVENT,
 
     GUI_WHEEL_CLICK_EVENT,
-    GUI_FRONT_CLICK_EVENT
+    GUI_FRONT_CLICK_EVENT,
+
+    // Direct touch: a scroll moved by some number of items (see gui_take_touch_scroll_steps())
+    GUI_TOUCH_SCROLL_EVENT
 } gui_event_t;
 
 // How should split values be interpreted
@@ -499,6 +502,11 @@ void gui_activity_set_touch_nav_select_area(gui_activity_t* activity, gui_view_n
 void gui_set_home_activity(gui_activity_t* activity);
 void gui_nav_back(void);
 void gui_nav_home(void);
+// Gets the item's symbol and text, 'offset' items away from the selected one - returns false if there is none
+typedef bool (*gui_touch_scroll_item_fn)(int offset, const char** symbol, const char** text);
+void gui_activity_set_touch_scroll(gui_activity_t* activity, gui_view_node_t* symbol, gui_view_node_t* text,
+    gui_view_node_t* next_symbol, gui_touch_scroll_item_fn get_item);
+int gui_take_touch_scroll_steps(void);
 #endif
 
 #endif /* GUI_H_ */

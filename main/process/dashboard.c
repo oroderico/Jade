@@ -386,6 +386,31 @@ static bool step_home_screen_menu_item(uint8_t* item, const bool forward)
     return true;
 }
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+// The menu item 'offset' items away from the selected one, for scrolling the home screen.
+// Returns false if there is no such item.
+static bool get_home_screen_scroll_item(const int offset, const char** symbol, const char** text)
+{
+    JADE_ASSERT(symbol);
+    JADE_ASSERT(text);
+
+    uint8_t item = home_screen_menu_item;
+    for (int i = 0; i < offset; ++i) {
+        if (!step_home_screen_menu_item(&item, true)) {
+            return false;
+        }
+    }
+    for (int i = 0; i > offset; --i) {
+        if (!step_home_screen_menu_item(&item, false)) {
+            return false;
+        }
+    }
+    *symbol = home_menu_items[home_screen_type][item].symbol;
+    *text = home_menu_items[home_screen_type][item].text;
+    return true;
+}
+#endif
+
 static void update_home_screen_menu(void)
 {
     const home_menu_item_t* next_item = NULL;
@@ -2727,6 +2752,18 @@ static void do_dashboard(jade_process_t* process, const keychain_t* const initia
                         if (step_home_screen_menu_item(&home_screen_menu_item, true)) {
                             update_home_screen_menu();
                         }
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+                    } else if (ev_id == GUI_TOUCH_SCROLL_EVENT) {
+                        // Scrolled by touch - the screen already shows the new selection
+                        int steps = gui_take_touch_scroll_steps();
+                        while (steps > 0 && step_home_screen_menu_item(&home_screen_menu_item, true)) {
+                            --steps;
+                        }
+                        while (steps < 0 && step_home_screen_menu_item(&home_screen_menu_item, false)) {
+                            ++steps;
+                        }
+                        update_home_screen_menu();
+#endif
                     } else if (ev_id == gui_get_click_event()) {
                         // Click - handle the current button's event
                         main_thread_action = MAIN_THREAD_ACTIVITY_UI_MENU;
@@ -2813,6 +2850,8 @@ void dashboard_process(void* process_ptr)
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
     // The navbar 'home' button goes back until this screen is reached
     gui_set_home_activity(act_home);
+    gui_activity_set_touch_scroll(act_home, home_screen_selected_entry.symbol, home_screen_selected_entry.text,
+        home_screen_next_entry.symbol, get_home_screen_scroll_item);
 #endif
 
     // We may as well associate the long-lived event data with this activity also

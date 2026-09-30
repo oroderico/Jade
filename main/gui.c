@@ -2724,6 +2724,14 @@ typedef struct {
     bool is_on_node; // still over 'node'
     bool has_moved; // too far to count as a tap
     bool is_done; // nothing more to do until released
+    bool can_scroll; // started on the items of a scrolling activity
+    bool is_scrolling; // the items are following the finger
+    int scroll_offset; // how far they have been scrolled
+    int scroll_min; // and how far they can go before reaching either end
+    int scroll_max;
+    uint16_t prev_x; // for the speed of the finger
+    TickType_t prev_tick;
+    int velocity; // pixels per second, positive when moving right
 } touch_press_t;
 static touch_press_t touch_press = { 0 };
 
@@ -2957,6 +2965,190 @@ static void nav_home_step(void)
     }
 }
 
+// Direct touch scroll: dragging across a carousel of items (the home screen) moves them
+// with the finger, drawn straight into the frame buffer, and on release they glide to the
+// nearest item - or further on, after a flick.  The activity then updates its nodes to
+// the new selection, on GUI_TOUCH_SCROLL_EVENT (see gui_take_touch_scroll_steps()).
+// The items' layout is taken from the nodes of the selected item and of the next one.
+#define GUI_TOUCH_SCROLL_SETTLE_MS 180
+#define GUI_TOUCH_SCROLL_FLING_MS 150 // how far a flick carries on, at its speed
+#define GUI_TOUCH_SCROLL_MAX_STEPS 3
+#define GUI_TOUCH_SCROLL_OVERSCROLL_DIV 3 // past either end the items follow the finger at a third of its speed
+
+typedef struct {
+    gui_activity_t* activity;
+    gui_view_node_t* symbol; // selected item's symbol and text
+    gui_view_node_t* text;
+    gui_view_node_t* next_symbol; // next item's symbol
+    color_t color; // unselected items' background
+    gui_touch_scroll_item_fn get_item;
+} touch_scroll_t;
+static touch_scroll_t touch_scroll = { 0 };
+static int touch_scroll_steps = 0;
+
+static inline int min_int(const int a, const int b) { return a < b ? a : b; }
+static inline int max_int(const int a, const int b) { return a > b ? a : b; }
+
+void gui_activity_set_touch_scroll(gui_activity_t* activity, gui_view_node_t* symbol, gui_view_node_t* text,
+    gui_view_node_t* next_symbol, gui_touch_scroll_item_fn get_item)
+{
+    JADE_ASSERT(activity);
+    JADE_ASSERT(symbol && symbol->kind == TEXT && symbol->parent && symbol->parent->kind == FILL);
+    JADE_ASSERT(text && text->kind == TEXT && text->parent && text->parent->kind == FILL);
+    JADE_ASSERT(next_symbol && next_symbol->kind == TEXT && next_symbol->parent && next_symbol->parent->kind == FILL);
+    JADE_ASSERT(get_item);
+    touch_scroll = (touch_scroll_t){ .activity = activity,
+        .symbol = symbol,
+        .text = text,
+        .next_symbol = next_symbol,
+        .color = node_get_fill_data(next_symbol->parent)->color,
+        .get_item = get_item };
+}
+
+// Returns (and resets) the number of items scrolled - negative for backwards
+int gui_take_touch_scroll_steps(void) { return __atomic_exchange_n(&touch_scroll_steps, 0, __ATOMIC_SEQ_CST); }
+
+// Whether the activity scrolls, and its nodes have been laid out
+static bool touch_scroll_ready(const gui_activity_t* activity)
+{
+    return activity && activity == touch_scroll.activity && !touch_scroll.symbol->parent->is_first_render
+        && !touch_scroll.text->parent->is_first_render && !touch_scroll.next_symbol->parent->is_first_render;
+}
+
+// The distance between one item and the next
+static int touch_scroll_pitch(void)
+{
+    return touch_scroll.next_symbol->parent->padded_constraints.x1 - touch_scroll.symbol->parent->padded_constraints.x1;
+}
+
+// The item nearest the selected position, when scrolled 'offset' pixels forward
+static int touch_scroll_nearest(const int offset)
+{
+    const int pitch = touch_scroll_pitch();
+    return offset >= 0 ? (offset + pitch / 2) / pitch : -((pitch / 2 - offset) / pitch);
+}
+
+// How many items there are after (or before) the selected one, up to GUI_TOUCH_SCROLL_MAX_STEPS
+static int touch_scroll_items_left(const bool forward)
+{
+    const char* symbol;
+    const char* text;
+    int count = 0;
+    while (count < GUI_TOUCH_SCROLL_MAX_STEPS
+        && touch_scroll.get_item(forward ? count + 1 : -(count + 1), &symbol, &text)) {
+        ++count;
+    }
+    return count;
+}
+
+// Whether the point is in the band of the screen the items take up
+static bool touch_scroll_in_band(const uint16_t y)
+{
+    return y >= touch_scroll.symbol->parent->padded_constraints.y1
+        && y <= touch_scroll.text->parent->padded_constraints.y2;
+}
+
+// Draw the text of a node of the selected item, 'dx' pixels along, clipped to 'clip'
+static void touch_scroll_draw_text(gui_view_node_t* node, const int dx, const char* str, const dispWin_t* clip)
+{
+    const struct view_node_text_data* const data = node_get_text_data(node);
+    const dispWin_t* const cs = &node->padded_constraints;
+
+    // As the nodes: left-aligned and vertically centred
+    display_set_font(data->font);
+    const int y = cs->y1 + (cs->y2 - cs->y1 - display_get_font_height()) / 2;
+    _fg = data->color;
+    display_print_clipped(str, cs->x1 + dx, y, cs->x2 + dx, clip);
+}
+
+// Draw the items, scrolled 'offset' pixels forward from the selected item
+static void touch_scroll_render(const int offset)
+{
+    gui_view_node_t* const top = touch_scroll.symbol->parent;
+    const gui_view_node_t* const bottom = touch_scroll.text->parent;
+    const dispWin_t* const top_cs = &top->padded_constraints;
+    const dispWin_t* const bottom_cs = &bottom->padded_constraints;
+    const int pitch = touch_scroll_pitch();
+    const int width = top_cs->x2 - top_cs->x1;
+    const int screen_x1 = CONFIG_DISPLAY_OFFSET_X;
+    const int screen_x2 = CONFIG_DISPLAY_OFFSET_X + CONFIG_DISPLAY_WIDTH;
+    const color_t selected_color = node_get_fill_data(top)->color;
+    const int nearest = touch_scroll_nearest(offset);
+
+    JADE_SEMAPHORE_TAKE(gui_mutex);
+    display_fill_rect(screen_x1, top_cs->y1, CONFIG_DISPLAY_WIDTH, bottom_cs->y2 - top_cs->y1, TFT_BLACK);
+
+    for (int item = nearest - 2; item <= nearest + 2; ++item) {
+        const int dx = item * pitch - offset;
+        const int x1 = max_int(top_cs->x1 + dx, screen_x1);
+        const int x2 = min_int(top_cs->x1 + dx + width, screen_x2);
+        const char* symbol = NULL;
+        const char* text = NULL;
+        if (x1 >= x2 || !touch_scroll.get_item(item, &symbol, &text)) {
+            continue;
+        }
+
+        const color_t color = item == nearest ? selected_color : touch_scroll.color;
+        display_fill_rect(x1, top_cs->y1, x2 - x1, top_cs->y2 - top_cs->y1, color);
+        display_fill_rect(x1, bottom_cs->y1, x2 - x1, bottom_cs->y2 - bottom_cs->y1, color);
+
+        const dispWin_t clip = { .x1 = x1, .y1 = top_cs->y1, .x2 = x2, .y2 = bottom_cs->y2 };
+        if (symbol) {
+            touch_scroll_draw_text(touch_scroll.symbol, dx, symbol, &clip);
+        }
+        if (text) {
+            touch_scroll_draw_text(touch_scroll.text, dx, text, &clip);
+        }
+    }
+
+    display_flush();
+    JADE_SEMAPHORE_GIVE(gui_mutex);
+}
+
+// The scroll offset for the finger having moved 'dx' pixels - resisting past either end,
+// but never so far that no item is nearest the selected position
+static int touch_scroll_offset(const int dx, const int min_offset, const int max_offset)
+{
+    const int max_overscroll = touch_scroll_pitch() / 3;
+    const int offset = -dx;
+    if (offset > max_offset) {
+        return max_offset + min_int((offset - max_offset) / GUI_TOUCH_SCROLL_OVERSCROLL_DIV, max_overscroll);
+    }
+    if (offset < min_offset) {
+        return min_offset - min_int((min_offset - offset) / GUI_TOUCH_SCROLL_OVERSCROLL_DIV, max_overscroll);
+    }
+    return offset;
+}
+
+// On release, glide from 'offset' to the nearest item - carrying on further after a flick,
+// at 'velocity' pixels per second (positive for the finger moving right) - then report it
+static void touch_scroll_settle(const int offset, const int velocity)
+{
+    const int projected = offset - (velocity * GUI_TOUCH_SCROLL_FLING_MS) / 1000;
+    const int steps = max_int(
+        min_int(touch_scroll_nearest(projected), touch_scroll_items_left(true)), -touch_scroll_items_left(false));
+    const int target = steps * touch_scroll_pitch();
+
+    // Ease out (cubic): the distance left shrinks with the cube of the time left
+    const TickType_t start = xTaskGetTickCount();
+    uint32_t elapsed;
+    do {
+        elapsed = min_int(pdTICKS_TO_MS(xTaskGetTickCount() - start), GUI_TOUCH_SCROLL_SETTLE_MS);
+        const int64_t left = GUI_TOUCH_SCROLL_SETTLE_MS - elapsed;
+        const int64_t total = GUI_TOUCH_SCROLL_SETTLE_MS;
+        touch_scroll_render(target - (int)((target - offset) * left * left * left / (total * total * total)));
+    } while (elapsed < GUI_TOUCH_SCROLL_SETTLE_MS);
+
+    if (steps) {
+        __atomic_add_fetch(&touch_scroll_steps, steps, __ATOMIC_SEQ_CST);
+        if (esp_event_post(GUI_EVENT, GUI_TOUCH_SCROLL_EVENT, NULL, 0, 50 / portTICK_PERIOD_MS) != ESP_OK) {
+            // The activity will not hear of it - so put the items back as they were
+            gui_take_touch_scroll_steps();
+            touch_scroll_render(0);
+        }
+    }
+}
+
 // Called on every touchscreen poll with the current touch state - 'is_pressed'
 // is false for presses that started on the virtual button strip, as those are
 // the classic prev/select/next buttons, handled by the input code.
@@ -2983,6 +3175,9 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
             if (touch_press.node && !touch_press.node->is_selected) {
                 select_node(touch_press.node);
             }
+            touch_press.can_scroll = touch_scroll_ready(touch_press.activity) && touch_scroll_in_band(y);
+            touch_press.prev_x = hit_x;
+            touch_press.prev_tick = touch_press.start;
         }
         return;
     }
@@ -3005,6 +3200,35 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
         touch_press.has_moved = true;
     }
 
+    // A mostly horizontal drag across the items of a scrolling activity scrolls them
+    if (is_pressed && touch_press.can_scroll && !touch_press.is_done) {
+        const int dx = (int)hit_x - touch_press.x;
+        const int dy = (int)y - touch_press.y;
+        if (!touch_press.is_scrolling && abs(dx) > GUI_TOUCH_DELTA && abs(dx) > abs(dy)) {
+            touch_press.is_scrolling = true;
+            touch_press.scroll_min = -touch_scroll_items_left(false) * touch_scroll_pitch();
+            touch_press.scroll_max = touch_scroll_items_left(true) * touch_scroll_pitch();
+        }
+        if (touch_press.is_scrolling) {
+            // Keep a running average of the finger's speed, for any flick on release
+            const TickType_t now = xTaskGetTickCount();
+            const int dt = pdTICKS_TO_MS(now - touch_press.prev_tick);
+            if (dt > 0) {
+                const int velocity = ((int)hit_x - touch_press.prev_x) * 1000 / dt;
+                touch_press.velocity = (touch_press.velocity + velocity) / 2;
+                touch_press.prev_x = hit_x;
+                touch_press.prev_tick = now;
+            }
+
+            const int offset = touch_scroll_offset(dx, touch_press.scroll_min, touch_press.scroll_max);
+            if (offset != touch_press.scroll_offset) {
+                touch_press.scroll_offset = offset;
+                touch_scroll_render(offset);
+            }
+            return;
+        }
+    }
+
     if (is_pressed) {
         // Press continuing - a critical button activates once held long enough
         if (!touch_press.is_done && touch_press.node) {
@@ -3022,7 +3246,11 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
     // Press released - a tap on a (non-critical) button activates it, while a
     // tap or swipe on a screen with nothing to tap may act as prev/select/next.
     // NOTE: once the finger is lifted x/y keep its last position.
-    if (touch_press.node) {
+    if (touch_press.is_scrolling) {
+        if (!touch_press.is_done) {
+            touch_scroll_settle(touch_press.scroll_offset, touch_press.velocity);
+        }
+    } else if (touch_press.node) {
         if (!touch_press.is_done && touch_press.is_on_node && !node_get_button_data(touch_press.node)->is_critical
             && touch_press.node->is_selected) {
             gui_front_click();
