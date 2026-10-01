@@ -2,6 +2,7 @@
 #include "../button_events.h"
 #include "../jade_assert.h"
 #include "../random.h"
+#include "../sensitive.h"
 #include "../ui.h"
 
 #define CHAR_BACKSPACE '|'
@@ -23,11 +24,6 @@ static inline bool entry_invert_navigation(void)
     return false;
 #endif
 }
-
-#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
-// With direct touch, pin entry uses a keypad rather than the digit carousel
-static inline bool uses_keypad(const digit_entry_t* digit_entry) { return digit_entry->entry_type == DIGIT_ENTRY_PIN; }
-#endif
 
 static uint8_t get_digit_entry_size(const digit_entry_t* digit_entry)
 {
@@ -151,6 +147,11 @@ static void reinitialise_current_entry_digit(digit_entry_t* digit_entry)
 static void update_digit_node(digit_entry_t* digit_entry, uint8_t i)
 {
     JADE_ASSERT(digit_entry && i < get_digit_entry_size(digit_entry));
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    if (!digit_entry->digit_nodes[i].fill_node) {
+        return; // number keyboard - no digit boxes
+    }
+#endif
 
     char strdigit[] = { '\0', '\0' };
     switch (digit_entry->digit_status[i]) {
@@ -164,12 +165,10 @@ static void update_digit_node(digit_entry_t* digit_entry, uint8_t i)
         gui_set_color(digit_entry->digit_nodes[i].fill_node, gui_get_highlight_color());
         gui_set_borders(digit_entry->digit_nodes[i].fill_node, gui_get_highlight_color(), 2, GUI_BORDER_ALL);
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
-        if (uses_keypad(digit_entry)) {
-            // No arrows or preselected digit - the value comes from the keypad
-            gui_update_text(digit_entry->digit_nodes[i].up_arrow_node, "");
-            gui_update_text(digit_entry->digit_nodes[i].down_arrow_node, "");
-            break;
-        }
+        // No arrows or preselected digit - the value comes from the keypad
+        gui_update_text(digit_entry->digit_nodes[i].up_arrow_node, "");
+        gui_update_text(digit_entry->digit_nodes[i].down_arrow_node, "");
+        break;
 #endif
         gui_update_text(digit_entry->digit_nodes[i].up_arrow_node, "K");
         gui_update_text(digit_entry->digit_nodes[i].down_arrow_node, "L");
@@ -243,14 +242,71 @@ static void make_digit_entry_boxes(
 }
 
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
-// Tappable pin entry keypad, used instead of the digit carousel
-// The title bar 'back' button acts as backspace
+// Only the digits that can come next (eg. not past any max_value) can be tapped,
+// and any 'enter' once a digit has been entered
+static void update_keypad_keys(digit_entry_t* digit_entry)
+{
+    const bool can_add_digit = digit_entry->selected_digit < get_digit_entry_size(digit_entry);
+    for (uint8_t i = 0; i < NUM_ENTRY_DIGITS; ++i) {
+        JADE_ASSERT(digit_entry->keys[i]);
+        gui_set_active(digit_entry->keys[i], can_add_digit && digit_entry_digit_allowed(digit_entry, i));
+    }
+    if (digit_entry->enter_key) {
+        gui_set_active(digit_entry->enter_key, digit_entry->selected_digit > 0);
+    }
+}
+
+// Show the digits entered so far on the number keyboard, after any message
+static void update_number_text(digit_entry_t* digit_entry)
+{
+    if (!digit_entry->number_text) {
+        return; // pin keypad - the digit boxes show the entry
+    }
+
+    char text[32]; // sufficient
+    SENSITIVE_PUSH(text, sizeof(text));
+    const char* const message = digit_entry->message;
+    int len = snprintf(text, sizeof(text), "%s%s", message ? message : "", message ? " " : "");
+    JADE_ASSERT(len >= 0 && len < sizeof(text));
+    for (uint8_t i = 0; i < digit_entry->selected_digit; ++i) {
+        JADE_ASSERT(digit_entry->digit_status[i] == SET && digit_entry->digit[i] < NUM_ENTRY_DIGITS);
+        JADE_ASSERT(len + 1 < sizeof(text));
+        text[len++] = ENTRY_CHARS[digit_entry->digit[i]];
+    }
+    text[len] = '\0';
+    gui_update_text(digit_entry->number_text, text);
+    SENSITIVE_POP(text);
+}
+
+// Make a key of a keypad/keyboard, labelled with a single character in the given font
+static gui_view_node_t* make_key(gui_view_node_t* parent, const char label, const uint32_t font, const uint32_t ev_id)
+{
+    gui_view_node_t* btn;
+    gui_make_button(&btn, TFT_BLACK, gui_get_highlight_color(), ev_id, NULL);
+    gui_set_margins(btn, GUI_MARGIN_ALL_EQUAL, 2);
+    gui_set_borders(btn, TFT_BLUE, 1, GUI_BORDER_ALL);
+    gui_set_borders_selected_color(btn, gui_get_highlight_color());
+    gui_set_borders_inactive_color(btn, TFT_BLACK);
+    gui_set_parent(btn, parent);
+
+    const char str[] = { label, '\0' };
+    gui_view_node_t* text;
+    gui_make_text_font(&text, str, TFT_WHITE, font);
+    gui_set_parent(text, btn);
+    gui_set_align(text, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
+    return btn;
+}
+
+// Tappable pin entry keypad, used instead of the digit carousel.
+// The title bar 'back' button acts as backspace, and the navbar 'home' button
+// abandons the entry altogether (see digit_entry_exited()).
 static void make_pin_keypad_activity(digit_entry_t* digit_entry, const char* title, const char* message)
 {
     digit_entry->activity = gui_make_activity();
     btn_data_t hdrbtns[] = { { .txt = "=", .font = JADE_SYMBOLS_16x16_FONT, .ev_id = BTN_KEYBOARD_BACKSPACE },
         { .txt = NULL, .font = GUI_DEFAULT_FONT, .ev_id = GUI_BUTTON_EVENT_NONE } };
     gui_view_node_t* const parent = add_title_bar(digit_entry->activity, title, hdrbtns, 2, &digit_entry->title);
+    gui_activity_set_nav_events(digit_entry->activity, GUI_BUTTON_EVENT, GUI_BUTTON_EVENT_NONE, BTN_KEYBOARD_EXIT);
     gui_view_node_t* node;
 
     gui_view_node_t* vsplit;
@@ -288,20 +344,64 @@ static void make_pin_keypad_activity(digit_entry_t* digit_entry, const char* tit
 
         for (size_t c = 0; c < 5; ++c) {
             const char key = keys[r * 5 + c];
-            gui_view_node_t* btn;
-            gui_make_button(&btn, TFT_BLACK, gui_get_highlight_color(), BTN_KEYBOARD_ASCII_OFFSET + key, NULL);
-            gui_set_margins(btn, GUI_MARGIN_ALL_EQUAL, 2);
-            gui_set_borders(btn, TFT_BLUE, 1, GUI_BORDER_ALL);
-            gui_set_borders_selected_color(btn, gui_get_highlight_color());
-            gui_set_parent(btn, hsplit);
-
-            const char str[] = { key, '\0' };
-            gui_view_node_t* label;
-            gui_make_text_font(&label, str, TFT_WHITE, DEJAVU24_FONT);
-            gui_set_parent(label, btn);
-            gui_set_align(label, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
+            digit_entry->keys[key - '0'] = make_key(hsplit, key, DEJAVU24_FONT, BTN_KEYBOARD_ASCII_OFFSET + key);
         }
     }
+    update_keypad_keys(digit_entry);
+}
+
+// Number keyboard, laid out as the recovery phrase keyboard: the number entered (after any
+// message) and below it the digit keys, then backspace and any enter.  The navbar 'back'
+// button leaves the entry (eg. back to the previous word, when entering recovery phrase
+// word numbers), and 'home' abandons it altogether (see digit_entry_exited()).
+static void make_number_keyboard_activity(digit_entry_t* digit_entry, const char* title, const char* message)
+{
+    digit_entry->activity = gui_make_activity();
+    digit_entry->message = message;
+    gui_view_node_t* const parent = add_title_bar(digit_entry->activity, title, NULL, 0, &digit_entry->title);
+    gui_activity_set_nav_events(digit_entry->activity, GUI_BUTTON_EVENT, BTN_KEYBOARD_BACK, BTN_KEYBOARD_EXIT);
+
+    gui_view_node_t* vsplit;
+    gui_make_vsplit(&vsplit, GUI_SPLIT_RELATIVE, 4, 25, 25, 25, 25);
+    gui_set_parent(vsplit, parent);
+
+    // The number entered - with a background, as it is updated
+    gui_view_node_t* node;
+    gui_make_fill(&node, TFT_BLACK, FILL_PLAIN, vsplit);
+    gui_make_text_font(&digit_entry->number_text, "", TFT_WHITE, DEJAVU24_FONT);
+    gui_set_align(digit_entry->number_text, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
+    gui_set_parent(digit_entry->number_text, node);
+
+    // Two rows of five digit keys, in order
+    static const char KEYS[] = "1234567890";
+    for (size_t r = 0; r < 2; ++r) {
+        gui_view_node_t* const hsplit = make_even_split(UI_ROW, 5);
+        gui_set_parent(hsplit, vsplit);
+        for (size_t c = 0; c < 5; ++c) {
+            const char key = KEYS[r * 5 + c];
+            digit_entry->keys[key - '0'] = make_key(hsplit, key, DEJAVU24_FONT, BTN_KEYBOARD_ASCII_OFFSET + key);
+        }
+    }
+
+    // Backspace and any enter ('|' and 'S' in these fonts)
+    gui_view_node_t* const hsplit = make_even_split(UI_ROW, 2);
+    gui_set_parent(hsplit, vsplit);
+    make_key(hsplit, '|', DEFAULT_FONT, BTN_KEYBOARD_BACKSPACE);
+    if (digit_entry_allows_enter(digit_entry)) {
+        digit_entry->enter_key = make_key(hsplit, 'S', VARIOUS_SYMBOLS_FONT, BTN_KEYBOARD_ENTER);
+    } else {
+        gui_make_fill(&node, TFT_BLACK, FILL_PLAIN, hsplit);
+    }
+
+    // No digits entered yet
+    digit_entry->selected_digit = 0;
+    for (size_t i = 0; i < get_digit_entry_size(digit_entry); ++i) {
+        digit_entry->digit[i] = 0xFF;
+        digit_entry->digit_status[i] = i == 0 ? SELECTED : EMPTY;
+    }
+    reinitialise_current_entry_digit(digit_entry);
+    update_number_text(digit_entry);
+    update_keypad_keys(digit_entry);
 }
 #endif // CONFIG_DISPLAY_TOUCH_DIRECT
 
@@ -310,10 +410,12 @@ void make_digit_entry_activity(digit_entry_t* digit_entry, const char* title, co
     JADE_ASSERT(digit_entry && digit_entry->entry_type != DIGIT_ENTRY_INVALID);
 
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
-    if (uses_keypad(digit_entry)) {
+    if (digit_entry->entry_type == DIGIT_ENTRY_PIN) {
         make_pin_keypad_activity(digit_entry, title, message);
-        return;
+    } else {
+        make_number_keyboard_activity(digit_entry, title, message);
     }
+    return;
 #endif
 
     digit_entry->activity = gui_make_activity();
@@ -392,8 +494,9 @@ static bool prev_selected_digit(digit_entry_t* digit_entry)
 
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
 // As run_digit_entry_loop() below, but driven by the keypad buttons
-static bool run_pin_keypad_loop(digit_entry_t* digit_entry)
+static bool run_keypad_loop(digit_entry_t* digit_entry)
 {
+    digit_entry->is_exited = false;
     int32_t ev_id;
     while (true) {
         gui_activity_wait_event(digit_entry->activity, GUI_BUTTON_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0);
@@ -403,13 +506,29 @@ static bool run_pin_keypad_loop(digit_entry_t* digit_entry)
                 // 'backspace' on first digit (cannot move to previous)
                 return false; // number entry abandoned
             }
+        } else if (ev_id == BTN_KEYBOARD_BACK) {
+            return false; // number entry abandoned
+        } else if (ev_id == BTN_KEYBOARD_EXIT) {
+            digit_entry->is_exited = true;
+            return false; // number entry abandoned altogether
+        } else if (ev_id == BTN_KEYBOARD_ENTER) {
+            if (digit_entry_allows_enter(digit_entry) && digit_entry->selected_digit > 0) {
+                return true; // number entry complete
+            }
         } else if (ev_id >= BTN_KEYBOARD_ASCII_OFFSET + '0' && ev_id <= BTN_KEYBOARD_ASCII_OFFSET + '9') {
-            digit_entry->current_selected_value = ev_id - BTN_KEYBOARD_ASCII_OFFSET - '0';
+            const uint8_t value = ev_id - BTN_KEYBOARD_ASCII_OFFSET - '0';
+            if (digit_entry->selected_digit >= get_digit_entry_size(digit_entry)
+                || !digit_entry_digit_allowed(digit_entry, value)) {
+                continue; // key not available (should be inactive)
+            }
+            digit_entry->current_selected_value = value;
             if (!next_selected_digit(digit_entry)) {
                 // Number entered on last digit (cannot move to next)
                 return true; // number entry complete
             }
         }
+        update_number_text(digit_entry);
+        update_keypad_keys(digit_entry);
     }
 }
 #endif // CONFIG_DISPLAY_TOUCH_DIRECT
@@ -421,9 +540,7 @@ bool run_digit_entry_loop(digit_entry_t* digit_entry)
     JADE_ASSERT(digit_entry && digit_entry->activity);
 
 #ifdef CONFIG_DISPLAY_TOUCH_DIRECT
-    if (uses_keypad(digit_entry)) {
-        return run_pin_keypad_loop(digit_entry);
-    }
+    return run_keypad_loop(digit_entry);
 #endif
 
     int32_t ev_id;
@@ -497,6 +614,12 @@ void reset_digit_entry(digit_entry_t* digit_entry, const char* title)
     if (title) {
         gui_update_text(digit_entry->title, title);
     }
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    digit_entry->is_exited = false;
+    update_number_text(digit_entry);
+    update_keypad_keys(digit_entry);
+#endif
 }
 
 uint32_t get_entry_as_number(const digit_entry_t* digit_entry)

@@ -1334,6 +1334,11 @@ static void set_wallet_erase_pin(void)
 
         // Ask user to re-enter PIN
         if (!run_digit_entry_loop(&digit_entry)) {
+            if (digit_entry_exited(&digit_entry)) {
+                // User abandoned setting wallet erase pin altogether
+                JADE_LOGI("User abandoned setting wallet erase PIN");
+                break;
+            }
             // User abandoned second input - back to first ...
             continue;
         }

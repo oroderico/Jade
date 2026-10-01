@@ -287,6 +287,7 @@ typedef enum {
     BTN_KEYBOARD_ENTER,
     BTN_KEYBOARD_SHIFT,
     BTN_KEYBOARD_PREV_WORD, // Direct touch navbar 'back' - back to the previous word
+    BTN_KEYBOARD_BACK, // Direct touch navbar 'back' - leave a number entry
     BTN_KEYBOARD_EXIT, // Direct touch navbar 'home' - abandon the entry
     BTN_KEYBOARD_ASCII_OFFSET
 

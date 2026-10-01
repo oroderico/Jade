@@ -79,6 +79,17 @@ typedef struct {
 
     uint8_t selected_digit;
     uint8_t current_selected_value;
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // Keypad keys, by digit, and any 'enter' key
+    gui_view_node_t* keys[10];
+    gui_view_node_t* enter_key;
+    // Number keyboard: the number entered, shown after any message
+    gui_view_node_t* number_text;
+    const char* message;
+    // Whether the entry was abandoned altogether (see digit_entry_exited())
+    bool is_exited;
+#endif
 } digit_entry_t;
 
 typedef struct {
@@ -198,6 +209,19 @@ void run_keyboard_entry_loop(keyboard_entry_t* kb_entry);
 // Functions for number entry
 void make_digit_entry_activity(digit_entry_t* digit_entry, const char* title, const char* message);
 bool run_digit_entry_loop(digit_entry_t* digit_entry);
+
+// Whether a digit entry that was abandoned (run_digit_entry_loop() returned false) was left
+// altogether, by the direct touch navbar 'home' button - rather than backed out of, which
+// some callers take as going back to an earlier entry.
+static inline bool digit_entry_exited(const digit_entry_t* digit_entry)
+{
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    return digit_entry->is_exited;
+#else
+    (void)digit_entry;
+    return false;
+#endif
+}
 void reset_digit_entry(digit_entry_t* digit_entry, const char* title);
 uint32_t get_entry_as_number(const digit_entry_t* digit_entry);
 

@@ -965,6 +965,15 @@ static wordlist_word_result_t select_resolved_word_number(const size_t word_inde
             selected = (selected + 1) % 2;
             break;
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+        case GUI_NAV_BACK_EVENT:
+            // Back to entering the word number
+            return WORDLIST_WORD_BACKSPACE;
+
+        case GUI_NAV_HOME_EVENT:
+            return WORDLIST_WORD_EXIT;
+#endif
+
         default:
             if (ev_id == gui_get_click_event()) {
                 return selected == 0 ? WORDLIST_WORD_SELECTED : WORDLIST_WORD_BACKSPACE;
@@ -1120,12 +1129,17 @@ static size_t get_word_number_words(
     SENSITIVE_PUSH(&digit_entry, sizeof(digit_entry));
 
     word_entry_ui_t calc_ui = { 0 };
-    make_word_entry_ui(&calc_ui, false, false, "Recover Wallet");
+    make_word_entry_ui(&calc_ui, false, true, "Recover Wallet");
 
     gui_view_node_t* number_text_selection = NULL;
     gui_view_node_t* number_label = NULL;
     gui_activity_t* const number_choose_word_activity
         = make_carousel_activity("Recover Wallet", &number_label, &number_text_selection);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // The word confirmation has no back button: the navbar 'back' goes back to entering
+    // the word number, and 'home' abandons the entry
+    gui_activity_set_nav_events(number_choose_word_activity, GUI_EVENT, GUI_NAV_BACK_EVENT, GUI_NAV_HOME_EVENT);
+#endif
 
     const char* wordlist_words[MNEMONIC_MAXWORDS] = { 0 };
     SENSITIVE_PUSH(wordlist_words, sizeof(wordlist_words));
@@ -1156,6 +1170,13 @@ static size_t get_word_number_words(
 
             const wordlist_word_result_t word_rslt = select_wordlist_word(
                 true, word_index, wordlist_words, final_words, num_filter_words, true, &calc_ui, &word);
+            SENSITIVE_POP(final_words);
+            if (word_rslt == WORDLIST_WORD_EXIT) {
+                // User abandoned
+                clear_word_number_restore_ui(&digit_entry, &calc_ui, number_text_selection);
+                word_index = 0;
+                goto cleanup;
+            }
             if (word_rslt == WORDLIST_WORD_BACKSPACE) {
                 // Go back to the previous accepted word so it can be replaced.
                 wordlist_words[--word_index] = NULL;
@@ -1163,14 +1184,13 @@ static size_t get_word_number_words(
                 JADE_ASSERT(word_rslt == WORDLIST_WORD_SELECTED && word);
                 word_selected = true;
             }
-            SENSITIVE_POP(final_words);
         }
 
         if (!word) {
             reset_digit_entry(&digit_entry, title);
             gui_set_current_activity(digit_entry.activity);
             if (!run_digit_entry_loop(&digit_entry)) {
-                if (word_index == 0) {
+                if (word_index == 0 || digit_entry_exited(&digit_entry)) {
                     clear_word_number_restore_ui(&digit_entry, &calc_ui, number_text_selection);
                     word_index = 0;
                     goto cleanup;
@@ -1194,6 +1214,12 @@ static size_t get_word_number_words(
         if (!word_selected) {
             const wordlist_word_result_t word_rslt = select_resolved_word_number(
                 word_index, word, number_choose_word_activity, number_label, number_text_selection);
+            if (word_rslt == WORDLIST_WORD_EXIT) {
+                // User abandoned
+                clear_word_number_restore_ui(&digit_entry, &calc_ui, number_text_selection);
+                word_index = 0;
+                goto cleanup;
+            }
             if (word_rslt == WORDLIST_WORD_BACKSPACE) {
                 continue;
             }
