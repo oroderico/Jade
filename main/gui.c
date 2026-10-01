@@ -2729,6 +2729,7 @@ typedef struct {
     bool has_moved; // too far to count as a tap
     bool is_done; // nothing more to do until released
     bool can_scroll; // started on the items of a scrolling activity
+    bool is_sliding; // started on the slider of the activity
     bool is_scrolling; // the items are following the finger
     int scroll_offset; // how far they have been scrolled
     int scroll_min; // and how far they can go before reaching either end
@@ -3176,6 +3177,42 @@ static void touch_scroll_settle(const int offset, const int velocity)
     }
 }
 
+// Direct touch slider: pressing on a screen's slider node, and dragging along it, sets
+// it to the step under the finger - from 1 at its left end to 'steps' at its right end.
+// The activity is told of each new value by GUI_TOUCH_SLIDER_EVENT.
+static uint8_t touch_slider_value = 0;
+
+void gui_activity_set_touch_slider(gui_activity_t* activity, gui_view_node_t* area, const uint8_t steps)
+{
+    JADE_ASSERT(activity);
+    JADE_ASSERT(area);
+    JADE_ASSERT(steps > 1);
+    activity->touch_slider_area = area;
+    activity->touch_slider_steps = steps;
+}
+
+// The value the slider was last set to
+uint8_t gui_get_touch_slider_value(void) { return __atomic_load_n(&touch_slider_value, __ATOMIC_SEQ_CST); }
+
+// Whether the activity has a slider, and the point is on it
+static bool touch_slider_hit(const gui_activity_t* activity, const uint16_t x, const uint16_t y)
+{
+    return activity && activity->touch_slider_area && is_point_in_node(activity->touch_slider_area, x, y);
+}
+
+// Set the slider to the step under x - anywhere left or right of the slider counts as its ends
+static void touch_slider_update(const gui_activity_t* activity, const uint16_t x, const bool force)
+{
+    const dispWin_t* const area = &activity->touch_slider_area->padded_constraints;
+    const int width = area->x2 - area->x1;
+    const int pos = max_int(0, min_int((int)x - area->x1, width - 1));
+    const uint8_t value = 1 + (pos * activity->touch_slider_steps) / width;
+    if (force || value != touch_slider_value) {
+        __atomic_store_n(&touch_slider_value, value, __ATOMIC_SEQ_CST);
+        esp_event_post(GUI_EVENT, GUI_TOUCH_SLIDER_EVENT, NULL, 0, 50 / portTICK_PERIOD_MS);
+    }
+}
+
 // Called on every touchscreen poll with the current touch state - 'is_pressed'
 // is false for presses that started on the virtual button strip, as those are
 // the classic prev/select/next buttons, handled by the input code.
@@ -3203,6 +3240,10 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
                 select_node(touch_press.node);
             }
             touch_press.can_scroll = touch_scroll_ready(touch_press.activity) && touch_scroll_in_band(y);
+            touch_press.is_sliding = touch_slider_hit(touch_press.activity, hit_x, y);
+            if (touch_press.is_sliding) {
+                touch_slider_update(touch_press.activity, hit_x, true);
+            }
             touch_press.prev_x = hit_x;
             touch_press.prev_tick = touch_press.start;
         }
@@ -3225,6 +3266,16 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
         && (hit_x > touch_press.x + GUI_TOUCH_DELTA || hit_x + GUI_TOUCH_DELTA < touch_press.x
             || y > touch_press.y + GUI_TOUCH_DELTA || y + GUI_TOUCH_DELTA < touch_press.y)) {
         touch_press.has_moved = true;
+    }
+
+    // A press that started on a slider moves it along with the finger
+    if (touch_press.is_sliding) {
+        if (is_pressed && !touch_press.is_done) {
+            touch_slider_update(touch_press.activity, hit_x, false);
+        }
+        if (is_pressed) {
+            return;
+        }
     }
 
     // A mostly horizontal drag across the items of a scrolling activity scrolls them
@@ -3277,6 +3328,8 @@ void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
         if (!touch_press.is_done) {
             touch_scroll_settle(touch_press.scroll_offset, touch_press.velocity);
         }
+    } else if (touch_press.is_sliding) {
+        // Nothing more to do - the slider was set as it moved
     } else if (touch_press.node) {
         if (!touch_press.is_done && touch_press.is_on_node && !node_get_button_data(touch_press.node)->is_critical
             && touch_press.node->is_selected) {

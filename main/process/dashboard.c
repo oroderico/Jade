@@ -192,6 +192,10 @@ gui_activity_t* make_usbstorage_settings_activity(bool unlocked);
 gui_activity_t* make_authentication_activity(bool initialised_and_pin_unlocked);
 gui_activity_t* make_prefs_settings_activity(bool initialised_and_locked, gui_view_node_t** qr_mode_network_item);
 gui_activity_t* make_display_settings_activity(void);
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+gui_activity_t* make_brightness_slider_activity(
+    gui_view_node_t** label, gui_view_node_t** segments, size_t num_segments);
+#endif
 gui_activity_t* make_info_activity(const char* fw_version);
 gui_activity_t* make_device_info_activity(void);
 
@@ -1792,6 +1796,46 @@ static void handle_screen_brightness(void)
         new_brightness = BACKLIGHT_MAX;
     }
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // With direct touch the brightness is set with a slider, taking effect as it moves, and
+    // the navbar 'back' (or 'home') button leaves - keeping the new brightness
+    const size_t num_levels = BACKLIGHT_MAX - BACKLIGHT_MIN + 1;
+    gui_view_node_t* label = NULL;
+    gui_view_node_t* segments[BACKLIGHT_MAX - BACKLIGHT_MIN + 1] = { NULL };
+    gui_activity_t* const act = make_brightness_slider_activity(&label, segments, num_levels);
+    JADE_ASSERT(label);
+    gui_activity_set_nav_events(act, GUI_EVENT, GUI_NAV_BACK_EVENT, GUI_NAV_HOME_EVENT);
+
+    bool done = false;
+    uint8_t shown_brightness = 0;
+    while (!done) {
+        // Show the current brightness as the label, and as the segments lit up to it
+        if (new_brightness != shown_brightness) {
+            gui_update_text(label, LABELS[new_brightness - BACKLIGHT_MIN]);
+            for (size_t i = 0; i < num_levels; ++i) {
+                const bool lit = i <= new_brightness - BACKLIGHT_MIN;
+                gui_set_color(segments[i], lit ? gui_get_highlight_color() : GUI_BLOCKSTREAM_UNHIGHTLIGHTED_DEFAULT);
+                gui_repaint(segments[i]);
+            }
+            if (!shown_brightness) {
+                gui_set_current_activity(act);
+            }
+            shown_brightness = new_brightness;
+        }
+
+        int32_t ev_id;
+        gui_activity_wait_event(act, GUI_EVENT, ESP_EVENT_ANY_ID, NULL, &ev_id, NULL, 0);
+        if (ev_id == GUI_TOUCH_SLIDER_EVENT) {
+            const uint8_t brightness = BACKLIGHT_MIN - 1 + gui_get_touch_slider_value();
+            if (brightness >= BACKLIGHT_MIN && brightness <= BACKLIGHT_MAX && brightness != new_brightness) {
+                new_brightness = brightness;
+                power_backlight_on(new_brightness);
+            }
+        } else {
+            done = (ev_id == GUI_NAV_BACK_EVENT || ev_id == GUI_NAV_HOME_EVENT);
+        }
+    }
+#else
     gui_view_node_t* item_text = NULL;
     gui_activity_t* const act = make_carousel_activity("Brightness", NULL, &item_text);
     JADE_ASSERT(item_text);
@@ -1832,6 +1876,7 @@ static void handle_screen_brightness(void)
             done = (ev_id == gui_get_click_event());
         }
     }
+#endif
 
     // Persist updated preferences
     if (new_brightness != initial_brightness) {

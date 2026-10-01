@@ -99,7 +99,10 @@ typedef enum {
     // Direct touch: the navbar 'back' and 'home' buttons, for screens that ask for them
     // (see gui_activity_set_nav_events())
     GUI_NAV_BACK_EVENT,
-    GUI_NAV_HOME_EVENT
+    GUI_NAV_HOME_EVENT,
+
+    // Direct touch: a slider was set to a new value (see gui_get_touch_slider_value())
+    GUI_TOUCH_SLIDER_EVENT
 } gui_event_t;
 
 // How should split values be interpreted
@@ -364,6 +367,11 @@ struct gui_activity_t {
     esp_event_base_t nav_event_base;
     uint32_t nav_back_event_id;
     uint32_t nav_home_event_id;
+
+    // Direct touch: node dragged along as a slider, and its number of steps, if any
+    // (see gui_activity_set_touch_slider())
+    gui_view_node_t* touch_slider_area;
+    uint8_t touch_slider_steps;
 #endif
 };
 
@@ -520,6 +528,8 @@ typedef bool (*gui_touch_scroll_item_fn)(int offset, const char** symbol, const 
 void gui_activity_set_touch_scroll(gui_activity_t* activity, gui_view_node_t* symbol, gui_view_node_t* text,
     gui_view_node_t* next_symbol, gui_touch_scroll_item_fn get_item);
 int gui_take_touch_scroll_steps(void);
+void gui_activity_set_touch_slider(gui_activity_t* activity, gui_view_node_t* area, uint8_t steps);
+uint8_t gui_get_touch_slider_value(void);
 #endif
 
 #endif /* GUI_H_ */

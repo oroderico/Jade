@@ -451,6 +451,47 @@ gui_activity_t* make_display_settings_activity(void)
     return make_menu_activity("Display", hdrbtns, 2, menubtns, sizeof(menubtns) / sizeof(btn_data_t));
 }
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+// The screen brightness as a bar of 'num_segments' segments, lit up to the current level,
+// which is set by dragging along it (or tapping on it), with a label for the level above
+gui_activity_t* make_brightness_slider_activity(
+    gui_view_node_t** label, gui_view_node_t** segments, const size_t num_segments)
+{
+    JADE_INIT_OUT_PPTR(label);
+    JADE_ASSERT(segments);
+    JADE_ASSERT(num_segments > 1);
+
+    gui_activity_t* const act = gui_make_activity();
+    gui_view_node_t* const parent = add_title_bar(act, "Brightness", NULL, 0, NULL);
+
+    gui_view_node_t* vsplit;
+    gui_make_vsplit(&vsplit, GUI_SPLIT_RELATIVE, 3, 30, 35, 35);
+    gui_set_parent(vsplit, parent);
+
+    // Level label - with a background, as it is updated
+    gui_view_node_t* node;
+    gui_make_fill(&node, TFT_BLACK, FILL_PLAIN, vsplit);
+    gui_make_text(label, "", TFT_WHITE);
+    gui_set_align(*label, GUI_ALIGN_CENTER, GUI_ALIGN_MIDDLE);
+    gui_set_parent(*label, node);
+
+    // The bar, one segment per level
+    gui_view_node_t* const bar = make_even_split(UI_ROW, num_segments);
+    gui_set_padding(bar, GUI_MARGIN_TWO_VALUES, 8, 8);
+    gui_set_parent(bar, vsplit);
+    for (size_t i = 0; i < num_segments; ++i) {
+        gui_make_fill(&segments[i], GUI_BLOCKSTREAM_UNHIGHTLIGHTED_DEFAULT, FILL_PLAIN, bar);
+        gui_set_margins(segments[i], GUI_MARGIN_ALL_EQUAL, 2);
+    }
+    gui_activity_set_touch_slider(act, bar, num_segments);
+
+    // Blank space below
+    gui_make_fill(&node, TFT_BLACK, FILL_PLAIN, vsplit);
+
+    return act;
+}
+#endif
+
 gui_activity_t* make_authentication_activity(const bool initialised_and_pin_unlocked)
 {
     btn_data_t hdrbtns[] = { { .txt = "=", .font = JADE_SYMBOLS_16x16_FONT, .ev_id = BTN_SETTINGS_AUTHENTICATION_EXIT },
