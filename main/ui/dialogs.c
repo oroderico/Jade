@@ -198,6 +198,26 @@ void populate_title_bar(
     }
 }
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+// With direct touch, a title bar 'next' arrow or 'confirm' tick becomes a wide button at the
+// foot of the screen, labelled with what it does - as the 'Continue' button of
+// await_continueback_activity().  Returns the label, or NULL if the button is not one of these.
+static const char* get_footer_label(const btn_data_t* btn)
+{
+    if (btn->ev_id == GUI_BUTTON_EVENT_NONE || !btn->txt) {
+        return NULL;
+    }
+    if (btn->font == JADE_SYMBOLS_16x16_FONT && !strcmp(btn->txt, ">")) {
+        return "Continue";
+    }
+    if (btn->font == VARIOUS_SYMBOLS_FONT && !strcmp(btn->txt, "S")) {
+        // Critical buttons need a long press (see gui_set_button_critical())
+        return btn->is_critical ? "Hold to confirm" : "Confirm";
+    }
+    return NULL;
+}
+#endif
+
 // Helper to create and populate the common title bar
 gui_view_node_t* add_title_bar(
     gui_activity_t* activity, const char* title, btn_data_t* btns, const size_t num_btns, gui_view_node_t** title_node)
@@ -209,6 +229,35 @@ gui_view_node_t* add_title_bar(
     gui_view_node_t* vsplit;
     gui_make_vsplit(&vsplit, GUI_SPLIT_RELATIVE, 2, TITLE_BAR_HEIGHT_PCNT, 100 - TITLE_BAR_HEIGHT_PCNT);
     gui_set_parent(vsplit, activity->root_node);
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    const char* const footer_label = num_btns ? get_footer_label(&btns[1]) : NULL;
+    if (footer_label) {
+        // The title bar keeps the left button, and leaves the right one blank
+        btn_data_t hdrbtns[] = { btns[0], { .txt = NULL, .font = GUI_DEFAULT_FONT, .ev_id = GUI_BUTTON_EVENT_NONE } };
+        populate_title_bar(vsplit, title, hdrbtns, 2, title_node);
+        btns[0].btn = hdrbtns[0].btn;
+
+        // The rest of the screen is split into the content and the footer button
+        gui_view_node_t* body;
+        gui_make_vsplit(&body, GUI_SPLIT_RELATIVE, 2, 80, 20);
+        gui_set_parent(body, vsplit);
+
+        gui_view_node_t* content;
+        gui_make_vsplit(&content, GUI_SPLIT_RELATIVE, 1, 100);
+        gui_set_parent(content, body);
+
+        btn_data_t ftrbtn = btns[1];
+        ftrbtn.txt = footer_label;
+        ftrbtn.font = GUI_DEFAULT_FONT;
+        ftrbtn.borders = GUI_BORDER_TOP;
+        add_button(body, &ftrbtn);
+        btns[1].btn = ftrbtn.btn; // for the caller, eg. to make it the initial selection
+
+        // Return the content as the parent for further ui elements
+        return content;
+    }
+#endif
 
     // Populate the title bar
     populate_title_bar(vsplit, title, btns, num_btns, title_node);
