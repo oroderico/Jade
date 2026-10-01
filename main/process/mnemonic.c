@@ -266,6 +266,31 @@ static void change_mnemonic_word_separator(char* mnemonic, const size_t len, con
     JADE_ASSERT(word == nwords && i == len + 1);
 }
 
+typedef enum {
+    WORDLIST_WORD_SELECTED,
+    WORDLIST_WORD_BACKSPACE,
+    WORDLIST_WORD_DONE,
+    WORDLIST_WORD_EXIT
+} wordlist_word_result_t;
+
+// Nodes shared by the keyboard and carousel used to select a BIP39 word.
+typedef struct {
+    gui_activity_t* enter_word_activity;
+    gui_view_node_t* titletext;
+    gui_view_node_t* textbox;
+    gui_view_node_t* backspace;
+    gui_view_node_t* enter;
+    gui_view_node_t* keys[WORD_ENTRY_KEYS_LEN];
+    gui_activity_t* choose_word_activity;
+    gui_view_node_t* label;
+    gui_view_node_t* text_selection;
+} word_entry_ui_t;
+
+static void make_word_entry_ui(word_entry_ui_t* ui, bool show_enter_btn, bool can_exit, const char* select_word_title);
+static wordlist_word_result_t select_wordlist_word(bool is_mnemonic, size_t word_index, const char* wordlist_words[],
+    const size_t* p_filter_words, size_t num_filter_words, bool random_first_selection_word, word_entry_ui_t* ui,
+    const char** selected_word);
+
 // Helper to display mnemonic words, and then have the user confirm some
 // NOTE: this function replaces spaces with \0's in the passed mnemonic!
 static bool display_confirm_mnemonic(const size_t nwords, char* mnemonic, const size_t mnemonic_len)
@@ -293,6 +318,13 @@ static bool display_confirm_mnemonic(const size_t nwords, char* mnemonic, const 
     make_show_mnemonic_activities(&first_activity, &last_activity, mnemonic, word_offs, nwords);
     JADE_ASSERT(first_activity && last_activity);
 
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+    // With direct touch the words are confirmed by typing them in, on the recovery phrase keyboard
+    word_entry_ui_t ui = { 0 };
+    make_word_entry_ui(&ui, false, true, "Confirm Phrase");
+    const char* no_words[MNEMONIC_MAXWORDS] = { 0 }; // only shown when not entering a mnemonic
+#endif
+
     while (!mnemonic_confirmed) {
         gui_set_current_activity(first_activity);
         int32_t ev_id;
@@ -317,10 +349,33 @@ static bool display_confirm_mnemonic(const size_t nwords, char* mnemonic, const 
         // and have user confirm one of them at random.
         // Ensures all words are at the very least displayed.
         mnemonic_confirmed = true; // will be set to false if wrong word selected
-        const size_t num_words_options = nwords == MNEMONIC_MAXWORDS ? 8 : 6;
         for (size_t i = 0; i < nwords; i += 3) {
             const size_t offset_word_to_confirm = get_uniform_random_byte(3);
             const size_t selected = i + offset_word_to_confirm;
+            bool correct = false;
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+            char title[16]; // sufficient
+            const int ret = snprintf(title, sizeof(title), "Confirm word %u", (unsigned int)(selected + 1));
+            JADE_ASSERT(ret > 0 && ret < sizeof(title));
+            gui_update_text(ui.titletext, title);
+
+            const char* typed_word = NULL;
+            const wordlist_word_result_t word_rslt
+                = select_wordlist_word(true, selected, no_words, NULL, 0, false, &ui, &typed_word);
+            if (word_rslt == WORDLIST_WORD_EXIT) {
+                // User abandoned
+                mnemonic_confirmed = false;
+                goto cleanup;
+            }
+            if (word_rslt == WORDLIST_WORD_BACKSPACE) {
+                // Back to the words
+                mnemonic_confirmed = false;
+                break;
+            }
+            JADE_ASSERT(word_rslt == WORDLIST_WORD_SELECTED && typed_word);
+            correct = !strcmp(typed_word, mnemonic + word_offs[selected]);
+#else
+            const size_t num_words_options = nwords == MNEMONIC_MAXWORDS ? 8 : 6;
             gui_view_node_t* textbox = NULL;
             gui_activity_t* const confirm_act
                 = make_confirm_mnemonic_word_activity(&textbox, i, offset_word_to_confirm, mnemonic, word_offs, nwords);
@@ -380,9 +435,11 @@ static bool display_confirm_mnemonic(const size_t nwords, char* mnemonic, const 
             }
 
             JADE_LOGD("selected word at index %u", index);
+            correct = random_words[index] == selected;
+#endif
 
             // the wrong word has been selected
-            if (random_words[index] != selected) {
+            if (!correct) {
                 await_error_3("Incorrect. Check your", "recovery phrase and", "try again.");
                 mnemonic_confirmed = false;
                 break;
@@ -652,26 +709,6 @@ static void write_wordlist_words(
         offset += ret;
     }
 }
-
-typedef enum {
-    WORDLIST_WORD_SELECTED,
-    WORDLIST_WORD_BACKSPACE,
-    WORDLIST_WORD_DONE,
-    WORDLIST_WORD_EXIT
-} wordlist_word_result_t;
-
-// Nodes shared by the keyboard and carousel used to select a BIP39 word.
-typedef struct {
-    gui_activity_t* enter_word_activity;
-    gui_view_node_t* titletext;
-    gui_view_node_t* textbox;
-    gui_view_node_t* backspace;
-    gui_view_node_t* enter;
-    gui_view_node_t* keys[WORD_ENTRY_KEYS_LEN];
-    gui_activity_t* choose_word_activity;
-    gui_view_node_t* label;
-    gui_view_node_t* text_selection;
-} word_entry_ui_t;
 
 // 'can_exit' is whether the entry can be abandoned (WORDLIST_WORD_EXIT), with direct touch
 static void make_word_entry_ui(
