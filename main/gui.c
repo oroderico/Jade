@@ -68,6 +68,16 @@ typedef struct {
 static SemaphoreHandle_t gui_mutex = NULL;
 // current activity being drawn on screen
 static gui_activity_t* current_activity = NULL;
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+// While the navbar 'home' button goes back to the home screen, the screens on the way are
+// drawn but not shown: nothing is flushed to the display until it gets there, or gives up
+// (see nav_home_step()).  Only used by the gui task.
+#define GUI_NAV_HOME_POLL_MS 10
+static bool nav_home_holds_display = false;
+static bool display_flush_held = false;
+static void nav_home_step(void);
+#endif
 // stack of activities that currently exist
 static activity_holder_t* existing_activities = NULL;
 
@@ -2594,7 +2604,17 @@ static void gui_task(void* args)
         // Wait for the next frame
         // Note: this task is never suspended, so no need to re-fetch the tick-
         // time each loop, just let vTaskDelayUntil() track the 'last_wake' count.
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+        if (nav_home_holds_display) {
+            // Going home - look sooner for the next screen on the way
+            vTaskDelay(GUI_NAV_HOME_POLL_MS / portTICK_PERIOD_MS);
+            last_wake = xTaskGetTickCount();
+        } else {
+            vTaskDelayUntil(&last_wake, period);
+        }
+#else
         vTaskDelayUntil(&last_wake, period);
+#endif
 
         // Take the gui semaphore while the gui task is awake
         JADE_SEMAPHORE_TAKE(gui_mutex);
@@ -2615,12 +2635,28 @@ static void gui_task(void* args)
 
         // Update status bar if required
         const bool force_redraw = false;
-        if (update_status_bar(force_redraw) || updated || jobs_handled) {
+        bool needs_flush = update_status_bar(force_redraw) || updated || jobs_handled;
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+        // Hold back any flush while going home, and flush once there
+        if (nav_home_holds_display) {
+            display_flush_held = display_flush_held || needs_flush;
+            needs_flush = false;
+        } else if (display_flush_held) {
+            display_flush_held = false;
+            needs_flush = true;
+        }
+#endif
+        if (needs_flush) {
             // Flush
             display_flush();
         }
 
         JADE_SEMAPHORE_GIVE(gui_mutex);
+
+#ifdef CONFIG_DISPLAY_TOUCH_DIRECT
+        // Move any 'home' along, now any new screen is current
+        nav_home_step();
+#endif
     }
 
 #ifdef CONFIG_LIBJADE
@@ -2928,9 +2964,12 @@ void gui_nav_back(void)
 // and on reaching a screen already stepped back from (eg. an 'are you sure?' prompt
 // whose 'back' returns to the previous screen).
 #define GUI_NAV_HOME_MAX_STEPS 16
-#define GUI_NAV_HOME_TIMEOUT_MS 2000
+#define GUI_NAV_HOME_NO_BACK_MS 300 // how long a screen without 'back' may take to move on by itself
+#define GUI_NAV_HOME_TIMEOUT_MS 2000 // how long a screen may take to act on 'back'
 
 static gui_activity_t* home_activity = NULL;
+
+static volatile bool nav_home_requested = false;
 
 typedef struct {
     bool is_pending;
@@ -2951,20 +2990,31 @@ void gui_set_home_activity(gui_activity_t* activity)
 void gui_nav_home(void)
 {
     if (!idletimer_register_activity(true) && home_activity) {
-        nav_home = (nav_home_t){ .is_pending = true };
+        nav_home_requested = true;
     }
 }
 
-// Called on every touchscreen poll to move a pending 'home' along
+static void nav_home_end(void)
+{
+    nav_home = (nav_home_t){ 0 };
+    nav_home_holds_display = false;
+}
+
+// Called by the gui task on every frame, after any change of screen, to move a 'home' along
 static void nav_home_step(void)
 {
+    if (nav_home_requested) {
+        nav_home_requested = false;
+        nav_home = (nav_home_t){ .is_pending = true };
+        nav_home_holds_display = true;
+    }
     if (!nav_home.is_pending) {
         return;
     }
 
     gui_activity_t* const activity = current_activity;
     if (activity == home_activity) {
-        nav_home = (nav_home_t){ 0 };
+        nav_home_end();
         return;
     }
 
@@ -2978,7 +3028,7 @@ static void nav_home_step(void)
     if (!nav_home.is_stepped) {
         for (size_t i = 0; i < nav_home.num_stepped; ++i) {
             if (nav_home.stepped[i] == activity) {
-                nav_home = (nav_home_t){ 0 };
+                nav_home_end();
                 return;
             }
         }
@@ -2988,8 +3038,9 @@ static void nav_home_step(void)
         }
     }
 
-    if (now - nav_home.seen_at >= pdMS_TO_TICKS(GUI_NAV_HOME_TIMEOUT_MS)) {
-        nav_home = (nav_home_t){ 0 };
+    const uint32_t timeout_ms = nav_home.is_stepped ? GUI_NAV_HOME_TIMEOUT_MS : GUI_NAV_HOME_NO_BACK_MS;
+    if (now - nav_home.seen_at >= pdMS_TO_TICKS(timeout_ms)) {
+        nav_home_end();
     }
 }
 
@@ -3222,8 +3273,6 @@ static void touch_slider_update(const gui_activity_t* activity, const uint16_t x
 void gui_touch_update(const uint16_t x, const uint16_t y, const bool is_pressed)
 {
     const uint16_t hit_x = gui_orientation_flipped ? CONFIG_DISPLAY_WIDTH - x : x;
-
-    nav_home_step();
 
     if (is_pressed && !touch_press.is_pressed) {
         // Press started - on a dimmed screen it only wakes the screen
